@@ -1,6 +1,7 @@
 import os
 import logging
-from typing import Iterable, AsyncIterable, List, Dict, Any, Optional
+import threading
+from typing import Iterable, AsyncIterable, List, Dict, Any, Optional, Tuple
 
 from openai import OpenAI, AsyncOpenAI
 from openai import (
@@ -20,19 +21,109 @@ class GrokAPIError(Exception):
 _DEFAULT_BASE_URL = "https://api.x.ai/v1"
 _DEFAULT_MODEL = os.getenv("XAI_MODEL", "grok-4")
 
+# Client connection pooling - reuse connections for better performance
+_sync_client_cache: Dict[Tuple[str, str], OpenAI] = {}
+_async_client_cache: Dict[Tuple[str, str], AsyncOpenAI] = {}
+_cache_lock = threading.Lock()
+
+# Configuration for connection pooling
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_TIMEOUT = 60.0  # seconds
+
+
+def _get_cache_key(api_key: Optional[str], base_url: Optional[str]) -> Tuple[str, str]:
+    """Generate cache key for client pooling"""
+    key = api_key or os.getenv("XAI_API_KEY", "")
+    url = base_url or os.getenv("XAI_BASE_URL", _DEFAULT_BASE_URL)
+    return (key, url)
+
 
 def _get_sync_client(api_key: Optional[str] = None, base_url: Optional[str] = None) -> OpenAI:
-    return OpenAI(
-        api_key=api_key or os.getenv("XAI_API_KEY"),
-        base_url=base_url or os.getenv("XAI_BASE_URL", _DEFAULT_BASE_URL),
-    )
+    """
+    Get or create a cached synchronous OpenAI client.
+
+    Uses connection pooling to reuse TCP connections and reduce latency.
+    Thread-safe with locking.
+
+    Args:
+        api_key: Optional API key (defaults to XAI_API_KEY env var)
+        base_url: Optional base URL (defaults to XAI_BASE_URL env var or xAI default)
+
+    Returns:
+        Cached or new OpenAI client instance
+    """
+    cache_key = _get_cache_key(api_key, base_url)
+
+    with _cache_lock:
+        if cache_key not in _sync_client_cache:
+            client = OpenAI(
+                api_key=cache_key[0],
+                base_url=cache_key[1],
+                max_retries=_DEFAULT_MAX_RETRIES,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            _sync_client_cache[cache_key] = client
+            logging.debug(f"Created new sync Grok client (cache size: {len(_sync_client_cache)})")
+
+        return _sync_client_cache[cache_key]
 
 
 def _get_async_client(api_key: Optional[str] = None, base_url: Optional[str] = None) -> AsyncOpenAI:
-    return AsyncOpenAI(
-        api_key=api_key or os.getenv("XAI_API_KEY"),
-        base_url=base_url or os.getenv("XAI_BASE_URL", _DEFAULT_BASE_URL),
-    )
+    """
+    Get or create a cached asynchronous OpenAI client.
+
+    Uses connection pooling to reuse TCP connections and reduce latency.
+    Thread-safe with locking.
+
+    Args:
+        api_key: Optional API key (defaults to XAI_API_KEY env var)
+        base_url: Optional base URL (defaults to XAI_BASE_URL env var or xAI default)
+
+    Returns:
+        Cached or new AsyncOpenAI client instance
+    """
+    cache_key = _get_cache_key(api_key, base_url)
+
+    with _cache_lock:
+        if cache_key not in _async_client_cache:
+            client = AsyncOpenAI(
+                api_key=cache_key[0],
+                base_url=cache_key[1],
+                max_retries=_DEFAULT_MAX_RETRIES,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            _async_client_cache[cache_key] = client
+            logging.debug(f"Created new async Grok client (cache size: {len(_async_client_cache)})")
+
+        return _async_client_cache[cache_key]
+
+
+def clear_client_cache():
+    """
+    Clear the client connection cache.
+
+    Useful for testing or when you need to force new connections.
+    Thread-safe operation.
+    """
+    with _cache_lock:
+        _sync_client_cache.clear()
+        _async_client_cache.clear()
+        logging.info("Cleared Grok client connection cache")
+
+
+def get_client_cache_stats() -> Dict[str, int]:
+    """
+    Get statistics about the client connection cache.
+
+    Returns:
+        Dictionary with cache statistics
+    """
+    with _cache_lock:
+        return {
+            'sync_clients': len(_sync_client_cache),
+            'async_clients': len(_async_client_cache),
+            'total_clients': len(_sync_client_cache) + len(_async_client_cache)
+        }
 
 
 def send_chat(
