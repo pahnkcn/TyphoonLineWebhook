@@ -35,7 +35,8 @@ from .config import (
     TOKEN_THRESHOLD,
     MAX_CONTEXT_WINDOW,
     CRISIS_CONFIG,
-    INFO_CONFIG
+    INFO_CONFIG,
+    get_dynamic_config
 )
 from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
 from .llm import grok_client
@@ -1876,11 +1877,21 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     filtered_messages = filter_messages_for_api(messages)
     effective_timeout = _calculate_adaptive_timeout(filtered_messages, base_timeout=timeout)
 
+    # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+    user_message = ""
+    for msg in reversed(filtered_messages):
+        if msg.get("role") == "user":
+            user_message = msg.get("content", "")
+            break
+
+    # เลือก config แบบ dynamic ตามบริบท
+    dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
     def _call() -> str:
         return grok_client.send_chat(
             messages=[SYSTEM_MESSAGES] + filtered_messages,
             model=config.XAI_MODEL,
-            **GENERATION_CONFIG,
+            **dynamic_config,
         )
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -2445,10 +2456,21 @@ def generate_ai_response(messages) -> str:
     """สร้างการตอบกลับด้วย AI โดยมีการจัดการข้อผิดพลาด (xAI Grok)"""
     try:
         filtered_messages = filter_messages_for_api(messages)
+
+        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+        user_message = ""
+        for msg in reversed(filtered_messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+
+        # เลือก config แบบ dynamic ตามบริบท
+        dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
         text = grok_client.send_chat(
             messages=[SYSTEM_MESSAGES] + filtered_messages,
             model=config.XAI_MODEL,
-            **GENERATION_CONFIG,
+            **dynamic_config,
         )
         if not text:
             logging.error("ได้รับการตอบกลับที่ไม่ถูกต้องจาก xAI Grok API")

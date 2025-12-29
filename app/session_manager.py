@@ -329,9 +329,9 @@ def generate_contextual_followup_message(user_id: str, db, config):
                 {"role": "user", "content": followup_prompt}
             ],
             model=config.XAI_MODEL,
-            temperature=0.6,
-            max_tokens=400,
-            top_p=0.85,
+            temperature=0.75,  # เพิ่มจาก 0.6 → ความเป็นธรรมชาติมากขึ้น
+            max_tokens=800,    # เพิ่มจาก 400 → พื้นที่เพียงพอ
+            top_p=0.9,         # เพิ่มจาก 0.85 → หลากหลายมากขึ้น
         )
         
         # ตรวจสอบและทำความสะอาดผลลัพธ์

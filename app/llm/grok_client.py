@@ -19,7 +19,7 @@ class GrokAPIError(Exception):
 
 # Defaults per xAI docs: use OpenAI client with base_url to xAI
 _DEFAULT_BASE_URL = "https://api.x.ai/v1"
-_DEFAULT_MODEL = os.getenv("XAI_MODEL", "grok-4")
+_DEFAULT_MODEL = os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning")
 
 # Client connection pooling - reuse connections for better performance
 _sync_client_cache: Dict[Tuple[str, str], OpenAI] = {}

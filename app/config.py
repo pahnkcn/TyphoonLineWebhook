@@ -40,7 +40,7 @@ class Config:
     PORT: int
     
     # ตัวแปรที่มีค่าเริ่มต้นต้องมาหลังตัวแปรที่ไม่มีค่าเริ่มต้น
-    XAI_MODEL: str = field(default="grok-4")
+    XAI_MODEL: str = field(default="grok-4-1-fast-reasoning")
 
 def load_config():
     """
@@ -79,7 +79,7 @@ def load_config():
         'ENVIRONMENT': 'development',
         'LOG_LEVEL': 'INFO',
         'PORT': '5000',
-        'XAI_MODEL': 'grok-4'
+        'XAI_MODEL': 'grok-4-1-fast-reasoning'
     }
     
     for var, default in defaults.items():
@@ -112,7 +112,7 @@ def load_config():
         ENVIRONMENT=os.getenv('ENVIRONMENT'),
         LOG_LEVEL=os.getenv('LOG_LEVEL'),
         PORT=int(os.getenv('PORT')),
-        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4')
+        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-reasoning')
     )
     
     return config
@@ -293,36 +293,83 @@ Taking Steps: "ผมลบเบอร์คนขายยาไปแล้�
 # คอนฟิกการสร้างข้อความ - แยกตามบริบท
 # สำหรับการสนทนาทั่วไป (Motivational Interviewing)
 GENERATION_CONFIG = {
-    "temperature": 0.7,  # เพิ่มจาก 0.6 เพื่อให้มีความเป็นธรรมชาติและเอาใจใส่มากขึ้น
-    "max_tokens": 4000,  # เหมาะกับการสนทนาแบบ LINE (กระชับ แต่ละเอียดพอ)
+    "temperature": 0.8,  # เพิ่มจาก 0.7 → ความหลากหลายและเป็นธรรมชาติมากขึ้น
+    "max_tokens": 8000,  # เพิ่มจาก 4000 → พื้นที่ในการอธิบายมากขึ้น
     "top_p": 0.9,
+    "presence_penalty": 0.4,  # ลดการพูดซ้ำ
+    "frequency_penalty": 0.3,  # หลากหลายในการใช้คำ
 }
 
 # สำหรับสถานการณ์วิกฤต/ฉุกเฉิน
 CRISIS_CONFIG = {
     "temperature": 0.3,  # ต้องการความแม่นยำและความระมัดระวังสูง
-    "max_tokens": 3000,  # กระชับ ตรงประเด็น
+    "max_tokens": 6000,  # เพิ่มจาก 3000 → ตอบสนองวิกฤตอย่างครบถ้วน
     "top_p": 0.5,
+    "presence_penalty": 0.2,  # ลดการพูดซ้ำเล็กน้อย
 }
 
 # สำหรับการให้ข้อมูลเกี่ยวกับสารเสพติด/การรักษา
 INFO_CONFIG = {
-    "temperature": 0.4,  # ต้องการความถูกต้องแม่นยำ
-    "max_tokens": 3500,
+    "temperature": 0.3,  # ลดจาก 0.4 → ความถูกต้องสูงสุด
+    "max_tokens": 6000,  # เพิ่มจาก 3500 → ข้อมูลละเอียดมากขึ้น
     "top_p": 0.7,
+    "presence_penalty": 0.2,  # ลดการพูดซ้ำ
 }
 
 # คอนฟิกการสร้างข้อความสรุป
 SUMMARY_GENERATION_CONFIG = {
     "temperature": 0.3,
-    "max_tokens": 8000,  # พอสำหรับการสรุปที่ครบถ้วน
+    "max_tokens": 16000,  # เพิ่มจาก 8000 → สรุปละเอียดและครบถ้วนมากขึ้น
     "top_p": 0.5,
+    "presence_penalty": 0.3,  # ลดการพูดซ้ำ
 }
 
 # ค่า token threshold สำหรับจัดการประวัติการสนทนา
-# ปรับจาก 500,000 เป็น 300,000 (15% ของ context window 2M)
-# เพื่อประสิทธิภาพที่ดีขึ้นและลดค่าใช้จ่าย ยังคงเพียงพอสำหรับประวัติ 60-120+ การสนทนา
-TOKEN_THRESHOLD = 300000
+# เพิ่มเป็น 600,000 (30% ของ context window 2M) สำหรับการจำบริบทที่ดีขึ้น
+# เนื่องจากไม่คำนึงถึง token cost ให้จำประวัติได้มากขึ้นเพื่อคุณภาพการบำบัด
+TOKEN_THRESHOLD = 600000
 
-# ขีดจำกัด context window สูงสุดของ Grok-4 (ใช้ได้ 80% เพื่อความปลอดภัย)
-MAX_CONTEXT_WINDOW = int(2000000 * 0.8)  # 1,600,000 tokens
+# ขีดจำกัด context window สูงสุดของ Grok-4 (ใช้ได้ 90% เพื่อความปลอดภัย)
+MAX_CONTEXT_WINDOW = int(2000000 * 0.9)  # 1,800,000 tokens
+
+
+def get_dynamic_config(user_message: str, conversation_history: list = None) -> dict:
+    """
+    เลือก config ที่เหมาะสมตามบริบทของข้อความ
+
+    Args:
+        user_message: ข้อความจากผู้ใช้
+        conversation_history: ประวัติการสนทนา (optional)
+
+    Returns:
+        dict: Configuration dictionary ที่เหมาะสม
+    """
+    # คำสำคัญสำหรับสถานการณ์วิกฤต
+    crisis_keywords = [
+        'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย', 'ไม่อยากมีชีวิต',
+        'overdose', 'เกินขนาด', 'ก้าวร้าว', 'ทำร้ายคน',
+        'ฆ่า', 'หมดหวัง', 'ไม่มีทางออก', 'จบชีวิต'
+    ]
+
+    # คำสำคัญสำหรับการขอข้อมูล
+    info_keywords = [
+        'คืออะไร', 'อธิบาย', 'ข้อมูล', 'รายละเอียด',
+        'ผลข้างเคียง', 'อาการ', 'วิธีการ', 'ขั้นตอน',
+        'ยาอะไร', 'สารอะไร', 'เสพติดชนิดไหน', 'ความรู้',
+        'บอกหน่อย', 'แนะนำหน่อย', 'ช่วยอธิบาย'
+    ]
+
+    message_lower = user_message.lower()
+
+    # ตรวจสอบวิกฤต (ลำดับความสำคัญสูงสุด)
+    if any(keyword in message_lower for keyword in crisis_keywords):
+        logging.info("Detected crisis keywords - using CRISIS_CONFIG")
+        return CRISIS_CONFIG
+
+    # ตรวจสอบการขอข้อมูล
+    if any(keyword in message_lower for keyword in info_keywords):
+        logging.info("Detected information request - using INFO_CONFIG")
+        return INFO_CONFIG
+
+    # ค่าเริ่มต้น: การสนทนาทั่วไป
+    return GENERATION_CONFIG
