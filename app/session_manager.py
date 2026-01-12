@@ -35,28 +35,51 @@ def get_chat_session(user_id: str) -> List[Dict[str, str]]:
 
 
 def save_chat_session(user_id: str, messages: List[Dict[str, str]]) -> None:
-    """Save chat session history to Redis."""
+    """
+    Save chat session history to Redis with atomic token count update.
+
+    Uses Redis pipeline to ensure token count and session data are updated atomically.
+
+    Args:
+        user_id: LINE User ID
+        messages: List of message dictionaries with 'role' and 'content'
+    """
     try:
         max_messages = 100
         serialized_history = [
             {"role": msg["role"], "content": msg["content"]}
             for msg in messages[-max_messages:]
         ]
+
+        # Calculate token count ONCE before Redis operations
+        token_count = token_counter.count_message_tokens(serialized_history)
+
         ttl_seconds = max(int(SESSION_TIMEOUT or 0), 60)
-        redis_client.setex(
+
+        # Use Redis pipeline for atomic updates (CRITICAL FIX)
+        # This ensures token count and session are always in sync
+        pipe = redis_client.pipeline()
+
+        pipe.setex(
             f"chat_session:{user_id}",
             ttl_seconds,
             json.dumps(serialized_history),
         )
-        token_count = token_counter.count_message_tokens(serialized_history)
-        redis_client.setex(
+
+        pipe.setex(
             f"session_tokens:{user_id}",
             ttl_seconds,
             str(token_count),
         )
+
+        # Execute all commands atomically
+        pipe.execute()
+
         logging.debug(
-            f"บันทึกเซสชัน: {len(serialized_history)} ข้อความ, {token_count} โทเค็น สำหรับผู้ใช้ {user_id}"
+            f"บันทึกเซสชัน: {len(serialized_history)} ข้อความ, {token_count} โทเค็น "
+            f"สำหรับผู้ใช้ {user_id} (atomic update)"
         )
+
     except Exception as e:
         logging.error(f"Redis error in save_chat_session: {str(e)}")
 
@@ -119,23 +142,60 @@ def update_last_activity(user_id: str) -> None:
 
 
 def get_session_token_count(user_id: str) -> int:
-    """Calculate token usage for the current session."""
+    """
+    Get token usage for the current session with cache fallback.
+
+    Improved version with proper TTL synchronization and error handling.
+
+    Args:
+        user_id: LINE User ID
+
+    Returns:
+        Token count for the session (0 if error or no session)
+    """
     try:
+        # Try cached count first (fast path)
         cached_count = redis_client.get(f"session_tokens:{user_id}")
         if cached_count:
+            if isinstance(cached_count, bytes):
+                cached_count = cached_count.decode("utf-8")
             return int(cached_count)
+
+        # Cache miss - recalculate from session data
         session_data = redis_client.get(f"chat_session:{user_id}")
         if not session_data:
             return 0
+
+        if isinstance(session_data, bytes):
+            session_data = session_data.decode("utf-8")
+
         messages = json.loads(session_data)
         token_count = token_counter.count_message_tokens(messages)
-        ttl_seconds = max(int(SESSION_TIMEOUT or 0), 60)
-        redis_client.setex(
-            f"session_tokens:{user_id}",
-            ttl_seconds,
-            str(token_count),
+
+        # Update cache with SAME TTL as session (CRITICAL: synchronization)
+        ttl = redis_client.ttl(f"chat_session:{user_id}")
+        if ttl > 0:
+            # Session exists and has valid TTL
+            redis_client.setex(
+                f"session_tokens:{user_id}",
+                ttl,  # Use session's remaining TTL
+                str(token_count)
+            )
+        else:
+            # Fallback to default TTL if session TTL couldn't be retrieved
+            ttl_seconds = max(int(SESSION_TIMEOUT or 0), 60)
+            redis_client.setex(
+                f"session_tokens:{user_id}",
+                ttl_seconds,
+                str(token_count)
+            )
+
+        logging.debug(
+            f"Token count recalculated for {user_id}: {token_count} tokens, TTL={ttl}s"
         )
+
         return token_count
+
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการคำนวณโทเค็นของเซสชัน: {str(e)}")
         return 0
@@ -219,9 +279,9 @@ def generate_contextual_followup_message(user_id: str, db, config):
     from .llm import grok_client
     
     try:
-        # ดึงประวัติการสนทนาล่าสุด 20 ครั้ง โดยใช้ max_tokens แทน limit
-        # ใช้ max_tokens สูงเพื่อให้ได้ประมาณ 20 ข้อความล่าสุด
-        recent_history = db.get_user_history(user_id, max_tokens=20000)
+        # ดึงประวัติการสนทนาล่าสุด โดยใช้ max_tokens แทน limit
+        # ปรับให้สมดุลระหว่างบริบทและประสิทธิภาพ
+        recent_history = db.get_user_history(user_id, max_tokens=100000)
         
         # ถ้าไม่มีประวัติการสนทนา ใช้ข้อความติดตามทั่วไป
         if not recent_history:
@@ -269,9 +329,9 @@ def generate_contextual_followup_message(user_id: str, db, config):
                 {"role": "user", "content": followup_prompt}
             ],
             model=config.XAI_MODEL,
-            temperature=0.6,
-            max_tokens=250,
-            top_p=0.85,
+            temperature=0.75,  # เพิ่มจาก 0.6 → ความเป็นธรรมชาติมากขึ้น
+            max_tokens=800,    # เพิ่มจาก 400 → พื้นที่เพียงพอ
+            top_p=0.9,         # เพิ่มจาก 0.85 → หลากหลายมากขึ้น
         )
         
         # ตรวจสอบและทำความสะอาดผลลัพธ์
@@ -300,7 +360,7 @@ def generate_contextual_followup_message(user_id: str, db, config):
 def get_default_followup_message():
     """ข้อความติดตามทั่วไปสำหรับผู้ใช้ที่ไม่มีประวัติการสนทนา"""
     return (
-        "สวัสดีค่ะ ใจดีมาติดตามผลการเลิกใช้สารเสพติดของคุณ\n"
+        "สวัสดีครับ ใจดีมาติดตามผลการเลิกใช้สารเสพติดของคุณ\n"
         "คุณสามารถเล่าให้ฟังได้ว่าช่วงที่ผ่านมาเป็นอย่างไรบ้าง?"
     )
 
@@ -308,7 +368,7 @@ def get_default_followup_message():
 def get_fallback_followup_message():
     """ข้อความติดตามสำรองเมื่อ AI ตอบไม่เหมาะสม"""
     return (
-        "สวัสดีค่ะ ใจดีมาติดตามความเป็นไปนะคะ 😊\n\n"
-        "ช่วงที่ผ่านมาคุณเป็นอย่างไรบ้างคะ? มีอะไรที่อยากแชร์ให้ฟังไหม?\n"
-        "ใจดีพร้อมฟังและให้กำลังใจคุณเสมอนะคะ 💚"
+        "สวัสดีครับ ใจดีมาติดตามความเป็นไปนะครับ 😊\n\n"
+        "ช่วงที่ผ่านมาคุณเป็นอย่างไรบ้างครับ? มีอะไรที่อยากแชร์ให้ฟังไหม?\n"
+        "ใจดีพร้อมฟังและให้กำลังใจคุณเสมอนะครับ 💚"
     )

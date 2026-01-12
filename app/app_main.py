@@ -27,7 +27,17 @@ from apscheduler.schedulers.base import SchedulerNotRunningError
 
 # นำเข้าโมดูลภายในโปรเจค
 from .middleware.rate_limiter import init_limiter
-from .config import load_config, SYSTEM_MESSAGES, GENERATION_CONFIG, SUMMARY_GENERATION_CONFIG, TOKEN_THRESHOLD
+from .config import (
+    load_config,
+    SYSTEM_MESSAGES,
+    GENERATION_CONFIG,
+    SUMMARY_GENERATION_CONFIG,
+    TOKEN_THRESHOLD,
+    MAX_CONTEXT_WINDOW,
+    CRISIS_CONFIG,
+    INFO_CONFIG,
+    get_dynamic_config
+)
 from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
 from .llm import grok_client
 from .chat_history_db import ChatHistoryDB
@@ -70,10 +80,10 @@ SESSION_TIMEOUT = 604800  # 7 วัน (7 * 24 * 60 * 60 วินาที)
 MESSAGE_LOCK_TIMEOUT = 30  # ระยะเวลาล็อค (วินาที)
 DB_RESTORE_MESSAGE_PAIRS = 40  # จำนวนคู่ข้อความล่าสุดที่ใช้ในการกู้คืนจากฐานข้อมูล
 PROCESSING_MESSAGES = [
-    "⌛ กำลังคิดอยู่ค่ะ...",
+    "⌛ กำลังคิดอยู่ครับ...",
     "🤔 กำลังประมวลผลข้อความของคุณ...",
     "📝 กำลังเรียบเรียงคำตอบ...",
-    "🔄 รอสักครู่นะคะ..."
+    "🔄 รอสักครู่นะครับ..."
 ]
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
@@ -605,9 +615,25 @@ def summarize_conversation_chunk(chunk):
         return ""
 
     try:
-        summary_prompt = "นี่คือส่วนของประวัติการสนทนา โปรดสรุปประเด็นสำคัญในส่วนนี้โดยย่อ:\n"
+        # สร้างข้อความสนทนา
+        conversation_text = ""
         for _, msg, resp in chunk:
-            summary_prompt += f"\nผู้ใช้: {msg}\nบอท: {resp}\n"
+            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+        summary_prompt = f"""
+โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
+
+{conversation_text}
+
+กรุณาสรุปโดยครอบคลุม:
+1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
+2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
+3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
+4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
+5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
+
+**ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
+"""
 
         text = grok_client.send_chat(
             messages=[
@@ -623,14 +649,14 @@ def summarize_conversation_chunk(chunk):
         logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_chunk: {str(e)}")
         return ""
 
-def process_and_optimize_history(user_id, max_tokens=85000):
+def process_and_optimize_history(user_id, max_tokens=450000):
     """
     ประมวลผลและปรับปรุงประวัติการสนทนาให้เหมาะสมที่สุด
     รวมการสรุปเป็นชั้นๆ และการจัดลำดับความสำคัญ
 
     Args:
         user_id (str): LINE User ID
-        max_tokens (int): จำนวนโทเค็นสูงสุดที่ต้องการใช้
+        max_tokens (int): จำนวนโทเค็นสูงสุดที่ต้องการใช้ (90% ของ TOKEN_THRESHOLD)
 
     Returns:
         list: ประวัติการสนทนาที่ปรับปรุงแล้ว
@@ -777,9 +803,24 @@ def summarize_conversation_history(history):
                 return combined_summary
 
         # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
-        summary_prompt = "นี่คือประวัติการสนทนา โปรดสรุปประเด็นสำคัญในประวัติการสนทนานี้:\n"
+        conversation_text = ""
         for _, msg, resp in history:
-            summary_prompt += f"\nผู้ใช้: {msg}\nบอท: {resp}\n"
+            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+        summary_prompt = f"""
+โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
+
+{conversation_text}
+
+กรุณาสรุปโดยครอบคลุม:
+1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
+2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
+3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
+4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
+5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
+
+ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
+"""
 
         text = grok_client.send_chat(
             messages=[
@@ -818,8 +859,8 @@ def summarize_by_topic(history):
 {conversation}
 
 โปรดวิเคราะห์และแบ่งแยกหัวข้อสำคัญต่างๆ ในการสนทนานี้ พร้อมทั้งสรุปแต่ละหัวข้อ ตามรูปแบบนี้:
-1. [ชื่อหัวข้อ 1]: [สรุปสั้นๆ]
-2. [ชื่อหัวข้อ 2]: [สรุปสั้นๆ]
+1. [ชื่อหัวข้อ 1]: [สรุป]
+2. [ชื่อหัวข้อ 2]: [สรุป]
 ...
 
 แต่ละหัวข้อควรครอบคลุมประเด็นสำคัญที่พูดถึงโดยมีใจความชัดเจน กระชับ และเก็บรายละเอียดสำคัญไว้
@@ -841,7 +882,7 @@ def summarize_by_topic(history):
             ],
             model=config.XAI_MODEL,
             temperature=0.2,
-            max_tokens=800,
+            max_tokens=1500,
         )
 
         return text
@@ -866,27 +907,63 @@ def register_user_with_code(user_id, code):
         # ตรวจสอบว่ารหัสมีอยู่และยังไม่หมดอายุ
         query = 'SELECT code, form_data FROM registration_codes WHERE code = %s AND status = %s'
         result = db_manager.execute_query(query, (code, 'pending'), dictionary=True)
-        
+
         if not result:
             return False, "รหัสยืนยันไม่ถูกต้องหรือหมดอายุแล้ว"
-        
+
         # ดึงข้อมูล form และสรุป
         form_data_json = result[0].get('form_data', '{}')
         form_data = json.loads(form_data_json) if form_data_json else {}
-        
+
+        # ตรวจสอบว่า AI summary พร้อมหรือยัง
+        ai_summary = form_data.get('ai_summary', '')
+        processed_at_str = form_data.get('processed_at')
+
+        # ถ้ายังไม่มี AI summary และยังไม่ผ่าน timeout
+        if not ai_summary and processed_at_str:
+            try:
+                processed_at = datetime.fromisoformat(processed_at_str)
+                time_elapsed = (datetime.now() - processed_at).total_seconds()
+
+                # ถ้ายังไม่ถึง 5 นาที ให้บอกผู้ใช้รอ
+                if time_elapsed < 300:  # 5 minutes
+                    minutes_left = int((300 - time_elapsed) / 60) + 1
+                    return False, (
+                        "⏳ ระบบกำลังประมวลผลข้อมูลของคุณเพื่อสร้างบริบทที่เหมาะสม\n\n"
+                        f"กรุณารอสักครู่ประมาณ {minutes_left} นาที แล้วลองใช้คำสั่ง /verify อีกครั้ง\n\n"
+                        "การรอจะช่วยให้น้องใจดีเข้าใจบริบทและสถานการณ์ของคุณได้ดีขึ้น "
+                        "และสามารถให้คำปรึกษาที่เหมาะสมกับคุณมากที่สุดครับ 💚"
+                    )
+
+                # ถ้าเกิน 3 นาทีแล้ว ให้ลงทะเบียนได้แต่เตือนว่าไม่มี AI summary
+                logging.warning(f"AI summary timeout สำหรับรหัส {code} (ใช้เวลา {time_elapsed:.1f} วินาที)")
+
+            except (ValueError, TypeError) as e:
+                logging.warning(f"ไม่สามารถแปลงวันที่ processed_at: {str(e)}")
+
         # อัพเดทรหัสให้เชื่อมกับผู้ใช้และสถานะเป็น verified
         update_query = 'UPDATE registration_codes SET user_id = %s, status = %s, verified_at = %s WHERE code = %s'
         db_manager.execute_and_commit(update_query, (user_id, 'verified', datetime.now(), code))
-        
+
         # บันทึกบริบทเริ่มต้นของผู้ใช้
-        if form_data and 'ai_summary' in form_data:
-            save_user_initial_context(user_id, form_data['ai_summary'])
-            
+        if form_data and ai_summary:
+            save_user_initial_context(user_id, ai_summary)
+            logging.info(f"บันทึกบริบทสำหรับผู้ใช้ {user_id} สำเร็จ (AI summary พร้อม)")
+        else:
+            logging.warning(f"ลงทะเบียนผู้ใช้ {user_id} โดยไม่มี AI summary")
+
         # ส่งข้อความต้อนรับพร้อมบริบท
         welcome_message = create_personalized_welcome_message(form_data)
-        
+
+        # ถ้าไม่มี AI summary ให้เพิ่มข้อความแจ้งเตือน
+        if not ai_summary:
+            welcome_message += (
+                "\n\n⚠️ หมายเหตุ: ระบบยังไม่สามารถประมวลผลข้อมูลของคุณเสร็จสมบูรณ์ "
+                "แต่คุณสามารถใช้บริการได้ตามปกติ น้องใจดีพร้อมช่วยเหลือคุณครับ 💚"
+            )
+
         return True, welcome_message
-        
+
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการลงทะเบียน: {str(e)}")
         return False, "เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองอีกครั้ง"
@@ -944,30 +1021,16 @@ def get_user_context(user_id):
 
 def create_personalized_welcome_message(form_data):
     """สร้างข้อความต้อนรับแบบเฉพาะบุคคลตามข้อมูลจาก form"""
-    base_message = "✅ ลงทะเบียนเรียบร้อยแล้ว! ยินดีต้อนรับสู่แชทบอทน้องใจดีค่ะ\n\n"
+    base_message = "✅ ลงทะเบียนเรียบร้อยแล้ว! ยินดีต้อนรับสู่แชทบอทน้องใจดีครับ\n\n"
     
     if not form_data or 'ai_summary' not in form_data:
-        return base_message + "ใจดีพร้อมเป็นเพื่อนคุยและช่วยเหลือคุณในเส้นทางการเลิกสารเสพติด มีอะไรอยากคุยเป็นพิเศษไหมคะ?"
+        return base_message + "ใจดีพร้อมเป็นเพื่อนคุยและช่วยเหลือคุณในเส้นทางการเลิกสารเสพติด มีอะไรอยากคุยเป็นพิเศษไหมครับ?"
     
     # ถ้ามีข้อมูลจาก form ให้สร้างข้อความเฉพาะบุคคล
     personalized_message = base_message
     
-    # ตรวจสอบระดับความเสี่ยง
-    if 'full_data' in form_data and 'riskAssessment' in form_data['full_data']:
-        risk_level = form_data['full_data']['riskAssessment'].get('overallRisk', 'medium')
-        
-        if risk_level == 'high':
-            personalized_message += "ใจดีเข้าใจว่าคุณอาจกำลังเผชิญกับความท้าทายที่สำคัญ "
-            personalized_message += "พร้อมที่จะเป็นกำลังใจและช่วยเหลือคุณทุกขั้นตอนนะคะ\n\n"
-        elif risk_level == 'medium':
-            personalized_message += "ใจดีดีใจที่คุณตัดสินใจขอความช่วยเหลือ "
-            personalized_message += "เราจะผ่านเรื่องนี้ไปด้วยกันนะคะ\n\n"
-        else:
-            personalized_message += "ขอชื่นชมที่คุณให้ความสำคัญกับสุขภาพของตัวเอง "
-            personalized_message += "ใจดีพร้อมสนับสนุนคุณค่ะ\n\n"
-    
     personalized_message += "จากข้อมูลที่คุณให้มา ใจดีพร้อมที่จะช่วยเหลือคุณแบบเฉพาะบุคคล "
-    personalized_message += "คุณสามารถพูดคุยเรื่องใดก็ได้ที่คุณสบายใจ หรือถามคำถามที่อยากรู้ได้เลยค่ะ\n\n"
+    personalized_message += "คุณสามารถพูดคุยเรื่องใดก็ได้ที่คุณสบายใจ หรือถามคำถามที่อยากรู้ได้เลยครับ\n\n"
     personalized_message += "💚 พิมพ์ /help เพื่อดูคำสั่งทั้งหมด"
     
     return personalized_message
@@ -975,9 +1038,9 @@ def create_personalized_welcome_message(form_data):
 def send_registration_message(user_id):
     """ส่งข้อความแนะนำการลงทะเบียน"""
     register_message = (
-        "สวัสดีค่ะ! ยินดีต้อนรับสู่แชทบอท 'ใจดี'\n\n"
+        "สวัสดีครับ! ยินดีต้อนรับสู่แชทบอท 'ใจดี'\n\n"
         "เพื่อเริ่มใช้งาน คุณจำเป็นต้องลงทะเบียนก่อน โดยทำตามขั้นตอนดังนี้:\n\n"
-        "1. กรอกแบบฟอร์มที่ลิงก์นี้: https://forms.gle/gVE6WN7W5thHR1kZ9\n"
+        "1. กรอกแบบฟอร์มที่ลิงก์นี้: https://forms.gle/KYU4JNWL72TL3PsG9\n"
         "2. หลังกรอกเสร็จ คุณจะได้รับรหัสยืนยัน 6 หลัก\n"
         "3. นำรหัสมาพิมพ์ที่นี่ด้วยคำสั่ง \"/verify รหัส\" เช่น \"/verify 123456\"\n\n"
         "หากมีข้อสงสัย พิมพ์ /help เพื่อดูคำแนะนำ\n\n"
@@ -1335,30 +1398,74 @@ def summarize_form_data(form_data):
         if 'riskAssessment' in form_data:
             risk_data = form_data['riskAssessment']
             prompt += f"\n\nระดับความเสี่ยงโดยรวม: {risk_data.get('overallRisk', 'ไม่ระบุ')}\n"
-        
-        prompt += """
-กรุณาสรุปข้อมูลในหัวข้อต่อไปนี้:
-1. ประวัติการใช้สารเสพติด (ชนิด ความถี่ ระยะเวลา)
-2. ระดับความเสี่ยงและปัญหาที่พบ
-3. แรงจูงใจและเป้าหมายในการเลิก
-4. ปัจจัยสนับสนุนและอุปสรรค
-5. ข้อมูลสำคัญอื่นๆ ที่ควรทราบ
 
-โปรดสรุปให้กระชับ ชัดเจน และเป็นประโยชน์ต่อการให้คำปรึกษา
+        # เพิ่มข้อมูล Readiness และ Confidence (Readiness Ruler)
+        readiness_info = []
+        for item in form_data.get('responses', []):
+            question_lower = item.get('question', '').lower()
+            # ตรวจหาคำถามเกี่ยวกับความพร้อม
+            if any(keyword in question_lower for keyword in ['พร้อม', 'ready', 'readiness', 'ความพร้อม']):
+                readiness_info.append(f"ความพร้อม: {item.get('answer', 'ไม่ระบุ')}")
+            # ตรวจหาคำถามเกี่ยวกับความมั่นใจ
+            elif any(keyword in question_lower for keyword in ['มั่นใจ', 'confident', 'confidence', 'ความมั่นใจ']):
+                readiness_info.append(f"ความมั่นใจ: {item.get('answer', 'ไม่ระบุ')}")
+
+        if readiness_info:
+            prompt += "\n\nระดับความพร้อมและความมั่นใจในการเปลี่ยนแปลง (Readiness Ruler):\n"
+            for info in readiness_info:
+                prompt += f"- {info}\n"
+
+        prompt += """
+กรุณาสรุปข้อมูลในหัวข้อต่อไปนี้ โดยใช้หลักการ Motivational Interviewing:
+
+1. **ประวัติการใช้สารเสพติด**
+
+2. **ระดับความเสี่ยงและผลกระทบ (ASSIST Scores)**
+
+3. **ขั้นตอนของการเปลี่ยนแปลง (Stages of Change)** - **สำคัญมาก**:
+   จากข้อมูลทั้งหมด กรุณาระบุอย่างชัดเจนว่าผู้ใช้อยู่ในขั้นตอนใด:
+   - **Precontemplation**: ปฏิเสธปัญหา ไม่เห็นความจำเป็นต้องเปลี่ยน ยังไม่คิดจะเปลี่ยนแปลง
+   - **Contemplation**: เห็นปัญหาบ้างแล้ว มีความลังเลสองใจ (ambivalence) อยากจะเปลี่ยนแต่ยังไม่แน่ใจ
+   - **Preparation**: ตัดสินใจเปลี่ยนแล้ว มีแผนการเปลี่ยน พร้อมที่จะเริ่ม
+   - **Action**: กำลังดำเนินการเปลี่ยนแปลงอย่างจริงจัง (เริ่มเลิกหรือลดแล้ว)
+   - **Maintenance**: เลิกได้แล้วเกิน 6 เดือน กำลังรักษาพฤติกรรมใหม่
+
+   **ระบุว่าผู้ใช้น่าจะอยู่ในขั้นตอนใด พร้อมเหตุผล** (เช่น "Contemplation - เพราะแสดงความลังเลระหว่างอยากเลิกและกังวลว่าจะทำไม่ได้")
+
+4. **แรงจูงใจภายใน (Intrinsic Motivation)**
+
+5. **Change Talk และ Sustain Talk**:
+   - Change Talk: ประโยค/ความคิดที่แสดงถึงความต้องการเปลี่ยน (DARN: Desire-ความปรารถนา, Ability-ความสามารถ, Reason-เหตุผล, Need-ความจำเป็น)
+   - Sustain Talk: ประโยค/ความคิดที่แสดงการต่อต้านการเปลี่ยน
+   - Ambivalence: ความขัดแย้งภายในระหว่างต้องการเปลี่ยนกับต้องการคงเดิม
+
+6. **จุดแข็งและทรัพยากร (Strengths & Resources)**
+
+7. **อุปสรรคและความท้าทาย**
+
+8. **ประสบการณ์การเลิกในอดีต** (ถ้ามี)
+
+**คำแนะนำสำคัญ**:
+- ใช้ภาษาที่ไม่ตัดสิน เห็นใจ และให้กำลังใจ
+- เน้นจุดแข็งและความเชื่อมั่นในตนเอง (Self-efficacy)
+- มองหาและระบุ Change Talk ที่ซ่อนอยู่
+- ชี้ให้เห็น Ambivalence เพื่อใช้ในการสนทนา MI
+- สรุปให้กระชับแต่ครอบคลุมประเด็นสำคัญ
+- **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที** - **สำคัญมาก**
 """
-        
+
         # เรียก xAI Grok API
         summary = grok_client.send_chat(
             messages=[
                 {
                     "role": "system",
-                    "content": "คุณคือผู้เชี่ยวชาญด้านการบำบัดสารเสพติด ช่วยสรุปข้อมูลผู้ใช้อย่างเป็นมืออาชีพ",
+                    "content": "คุณคือผู้เชี่ยวชาญด้าน Motivational Interviewing (MI) และการบำบัดสารเสพติด สรุปข้อมูลผู้ใช้โดยเน้นหลัก MI: แรงจูงใจภายใน, ความพร้อมในการเปลี่ยนแปลง (Stages of Change), จุดแข็ง และทรัพยากรที่มีอยู่ ใช้ภาษาที่ไม่ตัดสิน (non-judgmental) และเน้นการสร้างความเชื่อมั่นในตนเอง (self-efficacy)",
                 },
                 {"role": "user", "content": prompt},
             ],
             model=config.XAI_MODEL,
             temperature=0.3,
-            max_tokens=1000,
+            max_tokens=2000,
         )
         return clean_ai_response(summary)
         
@@ -1485,7 +1592,7 @@ def handle_locked_user(user_id):
     if not wait_notice_sent:
         line_bot_api.push_message(
             user_id,
-            TextSendMessage(text="กรุณารอระบบประมวลผลข้อความก่อนหน้าให้เสร็จสิ้นก่อนค่ะ")
+            TextSendMessage(text="กรุณารอระบบประมวลผลข้อความก่อนหน้าให้เสร็จสิ้นก่อนครับ")
         )
         redis_client.setex(f"wait_notice:{user_id}", 10, "1")
 
@@ -1706,7 +1813,7 @@ def prepare_conversation_messages(user_id: str, user_context: Optional[str]) -> 
         used_history_ids: Set[int] = set()
         history_for_summary: List[Tuple] = []
 
-        history_token_limit = 20000 if not messages else 10000
+        history_token_limit = 100000 if not messages else 50000
         try:
             history_for_summary = db.get_user_history(user_id, max_tokens=history_token_limit) or []
         except Exception as e:
@@ -1770,11 +1877,21 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     filtered_messages = filter_messages_for_api(messages)
     effective_timeout = _calculate_adaptive_timeout(filtered_messages, base_timeout=timeout)
 
+    # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+    user_message = ""
+    for msg in reversed(filtered_messages):
+        if msg.get("role") == "user":
+            user_message = msg.get("content", "")
+            break
+
+    # เลือก config แบบ dynamic ตามบริบท
+    dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
     def _call() -> str:
         return grok_client.send_chat(
             messages=[SYSTEM_MESSAGES] + filtered_messages,
             model=config.XAI_MODEL,
-            **GENERATION_CONFIG,
+            **dynamic_config,
         )
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -1840,9 +1957,9 @@ def generate_fallback_response(user_message: str, user_context: Optional[str]) -
     
     # คำตอบทั่วไป
     return (
-        "ขออภัยค่ะ ระบบกำลังประสบปัญหาชั่วคราว\n\n"
+        "ขออภัยครับ ระบบกำลังประสบปัญหาชั่วคราว\n\n"
         "ใจดียังคงอยู่ที่นี่และพร้อมรับฟังคุณ "
-        "กรุณาลองพูดคุยกับใจดีอีกครั้งในอีกสักครู่นะคะ\n\n"
+        "กรุณาลองพูดคุยกับใจดีอีกครั้งในอีกสักครู่นะครับ\n\n"
         "หากต้องการความช่วยเหลือเร่งด่วน:\n"
         "📞 สายด่วนยาเสพติด: 1165\n"
         "📞 สายด่วนสุขภาพจิต: 1323"
@@ -1944,19 +2061,19 @@ def handle_chatbot_error(error: ChatbotError, user_id: str, user_message: str, r
         logging.error(f"ChatbotError [Legacy-{error.error_type.value}]: {error.message}")
 
         error_messages = {
-            ErrorType.AI_API_ERROR: "ขออภัยค่ะ ระบบ AI กำลังมีปัญหา กรุณาลองใหม่อีกครั้ง",
+            ErrorType.AI_API_ERROR: "ขออภัยครับ ระบบ AI กำลังมีปัญหา กรุณาลองใหม่อีกครั้ง",
             ErrorType.TOKEN_MANAGEMENT_ERROR: "กำลังจัดระเบียบข้อมูล กรุณารอสักครู่",
-            ErrorType.DATABASE_ERROR: "มีปัญหาในการบันทึกข้อมูล แต่เรายังคุยกันต่อได้ค่ะ",
+            ErrorType.DATABASE_ERROR: "มีปัญหาในการบันทึกข้อมูล แต่เรายังคุยกันต่อได้ครับ",
             ErrorType.MESSAGE_SEND_ERROR: "ไม่สามารถส่งข้อความได้ กรุณาตรวจสอบการเชื่อมต่อ",
         }
 
         message = error_messages.get(
             error.error_type,
-            "ขออภัยค่ะ เกิดข้อผิดพลาด กรุณาลองใหม่",
+            "ขออภัยครับ เกิดข้อผิดพลาด กรุณาลองใหม่",
         )
     else:
         logging.error(f"ChatbotError [{error.category.value}-{error.severity.value}]: {error.message}")
-        message = error.user_message or "ขออภัยค่ะ เกิดข้อผิดพลาด กรุณาลองใหม่"
+        message = error.user_message or "ขออภัยครับ เกิดข้อผิดพลาด กรุณาลองใหม่"
 
     try:
         send_final_response(user_id, message, reply_token=reply_token)
@@ -1980,7 +2097,7 @@ def handle_unexpected_error(error: Exception, user_id: str, user_message: str, r
 
     try:
         message = (
-            "ขออภัยค่ะ เกิดข้อผิดพลาดที่ไม่คาดคิด\n"
+            "ขออภัยครับ เกิดข้อผิดพลาดที่ไม่คาดคิด\n"
             f"รหัสข้อผิดพลาด: {error_id}\n\n"
             "กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ"
         )
@@ -2080,9 +2197,9 @@ def send_rate_limit_notification(user_id: str, wait_time: int):
     """แจ้งผู้ใช้เมื่อถูก rate limit"""
     try:
         message = (
-            f"⏳ ขออภัยค่ะ ระบบกำลังประมวลผลหนัก\n"
+            f"⏳ ขออภัยครับ ระบบกำลังประมวลผลหนัก\n"
             f"กรุณารอประมาณ {wait_time} วินาที แล้วลองใหม่อีกครั้ง\n\n"
-            "ใจดีจะรีบกลับมาคุยกับคุณโดยเร็วที่สุดนะคะ 💚"
+            "ใจดีจะรีบกลับมาคุยกับคุณโดยเร็วที่สุดนะครับ 💚"
         )
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
     except:
@@ -2115,12 +2232,12 @@ def prepare_conversation_context(messages, optimized_history, used_history_ids: 
 def send_session_timeout_message(user_id, reply_token=None):
     """ส่งข้อความเซสชันหมดอายุ"""
     welcome_back = (
-        "สวัสดีค่ะ ยินดีต้อนรับกลับมา 👋\n\n"
+        "สวัสดีครับ ยินดีต้อนรับกลับมา 👋\n\n"
         "เซสชันก่อนหน้าของเราหมดอายุแล้ว เราสามารถเริ่มการสนทนาใหม่ได้ทันที\n\n"
         "💡 ต้องการดูประวัติการสนทนาก่อนหน้า พิมพ์: /status\n"
         "💡 ต้องการดูรายงานความก้าวหน้า พิมพ์: /progress\n"
         "💡 ต้องการคำแนะนำเพิ่มเติม พิมพ์: /help\n\n"
-        "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีคะวันนี้?"
+        "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีครับวันนี้?"
     )
     send_final_response(user_id, welcome_back, reply_token=reply_token)
 
@@ -2164,9 +2281,9 @@ def handle_command_with_processing(user_id, command, reply_token=None):
         redis_client.delete(f"last_follow_up:{user_id}")
         redis_client.delete(f"first_interaction:{user_id}")
         response_text = (
-            "🔄 ล้างประวัติการสนทนาเรียบร้อยแล้วค่ะ\n\n"
+            "🔄 ล้างประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
             "เราสามารถเริ่มต้นการสนทนาใหม่ได้ทันที\n"
-            "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีคะ?"
+            "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีครับ?"
         )
 
     elif normalized == '/optimize':
@@ -2175,10 +2292,10 @@ def handle_command_with_processing(user_id, command, reply_token=None):
         token_count_after = get_session_token_count(user_id)
 
         response_text = (
-            f"🔄 ปรับปรุงประวัติการสนทนาเรียบร้อยแล้วค่ะ\n\n"
+            f"🔄 ปรับปรุงประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
             f"จำนวนโทเค็น: {token_count_before} → {token_count_after} ({(token_count_before - token_count_after)} ลดลง)\n\n"
             "ประวัติการสนทนาสำคัญยังคงถูกเก็บไว้ และบอทยังเข้าใจบริบทการสนทนาของเรา\n"
-            "เราสามารถสนทนาต่อได้ตามปกติค่ะ"
+            "เราสามารถสนทนาต่อได้ตามปกติครับ"
         )
 
     elif normalized == '/tokens':
@@ -2199,7 +2316,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
 
     elif normalized == '/help':
         response_text = (
-            "สวัสดีค่ะ 👋 ฉันคือน้องใจดี ผู้ช่วยดูแลและให้คำปรึกษาสำหรับผู้ที่ต้องการเลิกใช้สารเสพติด"
+            "สวัสดีครับ 👋 ฉันคือน้องใจดี ผู้ช่วยดูแลและให้คำปรึกษาสำหรับผู้ที่ต้องการเลิกใช้สารเสพติด"
             "💬 ฉันสามารถช่วยคุณได้ดังนี้:\n"
             "- พูดคุยและให้กำลังใจในการเลิกใช้สารเสพติด\n"
             "- ให้คำปรึกษาเกี่ยวกับวิธีรับมือความอยากและอาการถอน\n"
@@ -2225,7 +2342,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             "หากพบข้อผิดพลาด (บัค) หรือมีข้อเสนอแนะ สามารถติดต่อได้ที่:\n"
             "🔧 ผู้พัฒนาระบบ: pahnkcn@gmail.com\n"
             "📖 ผู้วิจัย: Std6548097@pcm.ac.th\n\n"
-            "เริ่มพูดคุยกับฉันได้เลยนะคะ ฉันพร้อมรับฟังและช่วยเหลือคุณ 💚"
+            "เริ่มพูดคุยกับฉันได้เลยนะครับ ฉันพร้อมรับฟังและช่วยเหลือคุณ 💚"
         )
 
     elif normalized == '/status':
@@ -2247,7 +2364,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             f"▫️ โทเค็นในฐานข้อมูล: {total_db_tokens:,}\n"
             "  (ผลรวมของแต่ละข้อความที่บันทึก)\n\n"
             "💚 น้องใจดีพร้อมให้คำปรึกษาและสนับสนุนคุณตลอดเส้นทางการเลิกสารเสพติด\n"
-            "💬 มีคำถามหรือต้องการความช่วยเหลือ เพียงพิมพ์บอกฉันได้เลยค่ะ\n\n"
+            "💬 มีคำถามหรือต้องการความช่วยเหลือ เพียงพิมพ์บอกฉันได้เลยครับ\n\n"
             "ℹ️ เคล็ดลับ: ต้องการดูรายงานความก้าวหน้าของคุณ พิมพ์ /progress"
         )
 
@@ -2286,7 +2403,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
         response_text = (
             "📝 การลงทะเบียนใช้งานน้องใจดี\n\n"
             "เพื่อเริ่มใช้งาน คุณจำเป็นต้องลงทะเบียนก่อน โดยทำตามขั้นตอนดังนี้:\n\n"
-            "1. กรอกแบบฟอร์มที่ลิงก์นี้: https://forms.gle/r5MGki6QFtBer2PM8\n"
+            "1. กรอกแบบฟอร์มที่ลิงก์นี้: https://forms.gle/KYU4JNWL72TL3PsG9\n"
             "2. หลังกรอกเสร็จ คุณจะได้รับรหัสยืนยัน 6 หลัก\n"
             "3. นำรหัสมาพิมพ์ที่นี่ด้วยคำสั่ง \"/verify รหัส\" เช่น \"/verify 123456\"\n\n"
             "หากมีปัญหาในการลงทะเบียน คุณสามารถติดต่อเจ้าหน้าที่ได้ที่ support@example.com"
@@ -2298,7 +2415,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             response_text = (
                 "📋 บริบทของคุณจากแบบประเมิน:\n\n"
                 f"{context}\n\n"
-                "ใจดีใช้ข้อมูลนี้เพื่อให้คำปรึกษาที่เหมาะสมกับคุณมากที่สุดค่ะ"
+                "ใจดีใช้ข้อมูลนี้เพื่อให้คำปรึกษาที่เหมาะสมกับคุณมากที่สุดครับ"
             )
         else:
             response_text = (
@@ -2311,7 +2428,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
     else:
         send_final_response(
             user_id,
-            "คำสั่งไม่ถูกต้องค่ะ ลองพิมพ์ /help เพื่อดูคำสั่งที่สามารถใช้ได้",
+            "คำสั่งไม่ถูกต้องครับ ลองพิมพ์ /help เพื่อดูคำสั่งที่สามารถใช้ได้",
             reply_token=reply_token,
         )
         return True
@@ -2339,10 +2456,21 @@ def generate_ai_response(messages) -> str:
     """สร้างการตอบกลับด้วย AI โดยมีการจัดการข้อผิดพลาด (xAI Grok)"""
     try:
         filtered_messages = filter_messages_for_api(messages)
+
+        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+        user_message = ""
+        for msg in reversed(filtered_messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+
+        # เลือก config แบบ dynamic ตามบริบท
+        dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
         text = grok_client.send_chat(
             messages=[SYSTEM_MESSAGES] + filtered_messages,
             model=config.XAI_MODEL,
-            **GENERATION_CONFIG,
+            **dynamic_config,
         )
         if not text:
             logging.error("ได้รับการตอบกลับที่ไม่ถูกต้องจาก xAI Grok API")
@@ -2370,62 +2498,112 @@ def callback():
 
     return 'OK'
 
+def process_ai_summary_async(code, full_form_data):
+    """
+    ประมวลผล AI summary ในพื้นหลัง (background thread)
+
+    Args:
+        code (str): รหัสยืนยัน
+        full_form_data (dict): ข้อมูล form ที่ต้องการสรุป
+    """
+    try:
+        logging.info(f"เริ่มสรุปข้อมูล form ในพื้นหลังสำหรับรหัส: {code}")
+
+        # สรุปข้อมูลด้วย AI
+        ai_summary = summarize_form_data(full_form_data)
+
+        # ดึงข้อมูลเดิมออกมาก่อน
+        select_query = 'SELECT form_data FROM registration_codes WHERE code = %s'
+        result = db_manager.execute_query(select_query, (code,))
+
+        if result and result[0]:
+            existing_data = json.loads(result[0][0])
+            # อัปเดต AI summary
+            existing_data['ai_summary'] = ai_summary
+            existing_data['ai_processed_at'] = datetime.now().isoformat()
+
+            # บันทึกกลับลงฐานข้อมูล
+            update_query = '''
+                UPDATE registration_codes
+                SET form_data = %s
+                WHERE code = %s
+            '''
+            db_manager.execute_and_commit(
+                update_query,
+                (json.dumps(existing_data), code)
+            )
+
+            logging.info(f"อัปเดต AI summary สำเร็จสำหรับรหัส: {code}")
+        else:
+            logging.warning(f"ไม่พบรหัส {code} ในฐานข้อมูล ไม่สามารถอัปเดต AI summary ได้")
+
+    except Exception as e:
+        logging.error(f"เกิดข้อผิดพลาดในการสรุปข้อมูล form แบบ async สำหรับรหัส {code}: {str(e)}")
+
+
 @app.route("/api/add-verification-code", methods=['POST'])
 @limiter.exempt
 def add_verification_code():
     """API endpoint รับรหัสยืนยันและข้อมูล form จาก Google Apps Script"""
-    
+
     # ตรวจสอบการรับรอง API key
     api_key = request.json.get('api_key', '')
     if api_key != os.getenv('FORM_WEBHOOK_KEY', 'your_secret_key_here'):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
-    
+
     # รับข้อมูลจาก request
     code = request.json.get('code', '')
     full_form_data = request.json.get('full_form_data', {})
-    
+
     if not code or not code.isdigit() or len(code) != 6:
         return jsonify({"success": False, "error": "Invalid verification code"}), 400
-    
+
     try:
         # ตรวจสอบว่ารหัสมีอยู่แล้วหรือไม่
         check_query = 'SELECT code FROM registration_codes WHERE code = %s'
         result = db_manager.execute_query(check_query, (code,))
-        
+
         if result and result[0]:
             return jsonify({"success": False, "error": "Code already exists"}), 409
-        
-        # สรุปข้อมูลด้วย AI
-        ai_summary = ""
-        if full_form_data:
-            logging.info(f"กำลังสรุปข้อมูล form สำหรับรหัส: {code}")
-            ai_summary = summarize_form_data(full_form_data)
-        
-        # เตรียมข้อมูลสำหรับบันทึก
+
+        # เตรียมข้อมูลสำหรับบันทึก (โดยยังไม่มี AI summary)
         form_data_json = {
             "full_data": full_form_data,
-            "ai_summary": ai_summary,
-            "processed_at": datetime.now().isoformat()
+            "ai_summary": "",  # จะถูกอัปเดทภายหลังโดย background thread
+            "processed_at": datetime.now().isoformat(),
+            "ai_processed_at": None
         }
-        
-        # บันทึกรหัสใหม่พร้อมข้อมูล form และสรุป
+
+        # บันทึกรหัสใหม่พร้อมข้อมูล form (โดยยังไม่มี AI summary)
         insert_query = '''
-            INSERT INTO registration_codes 
-            (code, created_at, status, form_data) 
+            INSERT INTO registration_codes
+            (code, created_at, status, form_data)
             VALUES (%s, %s, %s, %s)
         '''
         db_manager.execute_and_commit(
-            insert_query, 
+            insert_query,
             (code, datetime.now(), 'pending', json.dumps(form_data_json))
         )
-        
+
         logging.info(f"บันทึกรหัสยืนยันและข้อมูล form สำเร็จ: {code}")
+
+        # เริ่ม background thread เพื่อสรุปข้อมูลด้วย AI
+        if full_form_data:
+            summary_thread = threading.Thread(
+                target=process_ai_summary_async,
+                args=(code, full_form_data),
+                daemon=True
+            )
+            summary_thread.start()
+            logging.info(f"เริ่ม background thread เพื่อสรุปข้อมูล form สำหรับรหัส: {code}")
+
+        # ตอบกลับทันทีโดยไม่ต้องรอ AI summary
         return jsonify({
-            "success": True, 
+            "success": True,
             "message": "Verification code and form data saved successfully",
-            "summary_created": bool(ai_summary)
+            "summary_processing": bool(full_form_data)
         }), 201
-        
+
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการบันทึกรหัสยืนยัน: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500

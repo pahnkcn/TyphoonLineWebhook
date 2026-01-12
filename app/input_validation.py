@@ -242,20 +242,204 @@ class RegistrationCodeField(fields.String):
 
 # Schema Definitions
 
+class PromptInjectionDetector:
+    """
+    Detect and block LLM prompt injection attempts
+
+    Protects against:
+    - Instruction overrides
+    - Role manipulation
+    - System command injection
+    - Jailbreak attempts
+    - Delimiter attacks
+    """
+
+    # Suspicious patterns for LLM prompt injection
+    INJECTION_PATTERNS = [
+        # Instruction overrides (Thai + English)
+        r'(?i)(ignore|forget|discard|override|ลืม|ละเลย|เพิกเฉย).{0,20}(previous|above|earlier|prior|ก่อนหน้า|ข้างบน|ก่อน).{0,20}(instruction|prompt|rule|command|คำสั่ง|กฎ)',
+        r'(?i)(new|different|updated|ใหม่|เปลี่ยน|อัพเดท).{0,20}(instruction|prompt|role|personality|คำสั่ง|บทบาท|บุคลิก)',
+
+        # Role manipulation (Thai + English)
+        r'(?i)(you are now|ตอนนี้คุณคือ|คุณกลายเป็น|เปลี่ยนเป็น|ให้คุณเป็น).{0,30}(AI|assistant|chatbot|system|admin|ผู้ช่วย|บอท)',
+        r'(?i)system\s*[:：]\s*(you|คุณ)',
+        r'(?i)(act as|แสดงเป็น|ทำตัวเป็น|เล่นบทเป็น).{0,20}(AI|model|system|DAN)',
+
+        # System command injection
+        r'###\s*(system|admin|root|override)',
+        r'</?(system|assistant|user|human)>',  # Chat markup injection
+        r'\[(SYSTEM|ADMIN|OVERRIDE|ROOT)\]',
+        r'<\|.*?\|>',  # Special tokens
+
+        # Jailbreak attempts
+        r'(?i)(DAN|jailbreak|bypass|unlock|jail\s*break)',
+        r'(?i)(act as|pretend to be|simulate).{0,20}(without|ignore|bypass).{0,20}(restriction|limit|rule|filter|ข้อจำกัด|กฎ)',
+        r'(?i)developer\s*mode',
+
+        # Delimiter attacks
+        r'---+\s*(end|stop|finish)\s*of\s*(prompt|instruction|คำสั่ง)',
+        r'```.*?(system|instruction|prompt|คำสั่ง).*?```',
+
+        # Role confusion
+        r'(?i)(i|me|my|ฉัน|ผม|หนู|เรา)\s+(am|is|เป็น|คือ)\s+(AI|model|assistant|chatbot|grok|ผู้ช่วย)',
+
+        # Meta prompting
+        r'(?i)(summarize|translate|analyze|วิเคราะห์|สรุป|แปล)\s+(this\s+)?(prompt|instruction|system|คำสั่ง)',
+        r'(?i)what\s+(is|are)\s+your\s+(instruction|prompt|rule|system)',
+    ]
+
+    # Suspicious keywords (context-dependent)
+    SUSPICIOUS_KEYWORDS = {
+        'high_risk': [
+            'ignore instructions', 'ลืมคำสั่ง', 'bypass filter',
+            'system override', 'new personality', 'admin mode',
+            'forget everything', 'ลืมทุกอย่าง', 'reset personality',
+            'sudo mode', 'god mode'
+        ],
+        'medium_risk': [
+            'pretend to be', 'แกล้งทำเป็น', 'roleplay as',
+            'simulate', 'imagine you are', 'ลองจินตนาการว่า'
+        ]
+    }
+
+    @staticmethod
+    def detect_injection(text: str) -> tuple:
+        """
+        Detect prompt injection attempts
+
+        Args:
+            text: User input text to validate
+
+        Returns:
+            Tuple of (is_injection, risk_level, reason)
+            risk_level: "none", "medium", "high"
+        """
+        if not text or len(text.strip()) == 0:
+            return False, "none", ""
+
+        text_lower = text.lower()
+
+        # Check high-risk keywords first
+        for keyword in PromptInjectionDetector.SUSPICIOUS_KEYWORDS['high_risk']:
+            if keyword.lower() in text_lower:
+                return True, "high", f"high_risk_keyword: {keyword}"
+
+        # Check regex patterns
+        for pattern in PromptInjectionDetector.INJECTION_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                return True, "high", f"pattern_match: {pattern[:50]}..."
+
+        # Check medium-risk keywords
+        for keyword in PromptInjectionDetector.SUSPICIOUS_KEYWORDS['medium_risk']:
+            if keyword.lower() in text_lower:
+                return True, "medium", f"medium_risk_keyword: {keyword}"
+
+        # Check for unusual character patterns
+        if len(text) > 50:
+            # Too many special characters (excluding Thai)
+            # Count non-alphanumeric, non-Thai, non-whitespace characters
+            special_chars = sum(
+                1 for c in text
+                if not c.isalnum() and not ('\u0E00' <= c <= '\u0E7F') and not c.isspace()
+            )
+            special_char_ratio = special_chars / len(text)
+
+            if special_char_ratio > 0.3:
+                return True, "medium", f"high_special_char_ratio: {special_char_ratio:.2f}"
+
+            # Too many newlines (delimiter attacks)
+            newline_count = text.count('\n')
+            newline_ratio = newline_count / len(text)
+
+            if newline_ratio > 0.15:
+                return True, "medium", f"excessive_newlines: {newline_count}"
+
+        # Check for prompt leakage attempts
+        prompt_leak_patterns = [
+            r'(?i)show\s+(me\s+)?(your|the)\s+(prompt|instruction|system\s+message)',
+            r'(?i)what\s+(is|are)\s+your\s+(initial|original|system)\s+(instruction|prompt)',
+        ]
+
+        for pattern in prompt_leak_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True, "medium", "prompt_leakage_attempt"
+
+        return False, "none", ""
+
+    @staticmethod
+    def sanitize_for_llm(text: str) -> str:
+        """
+        Sanitize text to prevent injection while preserving meaning
+
+        Args:
+            text: Text to sanitize
+
+        Returns:
+            Sanitized text safe for LLM consumption
+        """
+        # Remove potential delimiters
+        text = re.sub(r'---+', ' ', text)
+        text = re.sub(r'===+', ' ', text)
+        text = re.sub(r'###', ' ', text)
+
+        # Remove markdown code blocks
+        text = re.sub(r'```.*?```', '[โค้ดถูกลบ]', text, flags=re.DOTALL)
+
+        # Remove chat markup
+        text = re.sub(r'</(system|user|assistant|human)>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'<(system|user|assistant|human)>', '', text, flags=re.IGNORECASE)
+
+        # Remove special tokens
+        text = re.sub(r'<\|.*?\|>', '', text)
+
+        # Normalize excessive whitespace/newlines
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'\s{3,}', '  ', text)
+
+        return text.strip()
+
+
 class UserMessageSchema(Schema):
-    """Schema for validating user messages"""
-    
+    """Schema for validating user messages with prompt injection protection"""
+
     user_id = LineUserIdField(required=True)
     message = ThaiTextString(required=True, validate=validate.Length(min=1, max=2000))
     timestamp = fields.DateTime(missing=datetime.now)
     message_type = fields.String(validate=validate.OneOf(['text', 'sticker', 'image', 'audio']))
-    
+
     @validates_schema
     def validate_message_content(self, data, **kwargs):
-        """Additional validation for message content"""
+        """Comprehensive message validation including injection detection"""
         message = data.get('message', '')
-        
-        # Check for potential injection attempts
+
+        # 1. Check for prompt injection (CRITICAL SECURITY)
+        is_injection, risk_level, reason = PromptInjectionDetector.detect_injection(message)
+
+        if is_injection:
+            if risk_level == "high":
+                # Block high-risk injections
+                logging.error(
+                    f"SECURITY: Prompt injection detected - {reason}\n"
+                    f"User: {data.get('user_id', 'unknown')[:8]}...\n"
+                    f"Message: {message[:100]}..."
+                )
+                raise SecurityValidationError(
+                    "ข้อความมีเนื้อหาที่อาจเป็นอันตราย กรุณาส่งข้อความใหม่",
+                    field_name='message',
+                    security_risk=f"prompt_injection_{reason}"
+                )
+            elif risk_level == "medium":
+                # Sanitize medium-risk injections but allow with warning
+                logging.warning(
+                    f"SECURITY: Possible injection attempt - {reason}\n"
+                    f"User: {data.get('user_id', 'unknown')[:8]}...\n"
+                    f"Message: {message[:100]}..."
+                )
+                # Sanitize the message
+                data['message'] = PromptInjectionDetector.sanitize_for_llm(message)
+
+        # 2. Check for XSS/HTML injection
         dangerous_patterns = [
             r'<script[^>]*>.*?</script>',
             r'javascript:',
@@ -264,7 +448,7 @@ class UserMessageSchema(Schema):
             r'<object',
             r'<embed'
         ]
-        
+
         for pattern in dangerous_patterns:
             if re.search(pattern, message, re.IGNORECASE):
                 raise SecurityValidationError(

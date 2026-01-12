@@ -26,13 +26,13 @@ class ChatHistoryDB:
         logging.info("ChatHistoryDB initialized with enhanced database manager")
 
     @safe_db_operation
-    def get_user_history(self, user_id: str, max_tokens: int = 10000) -> List[Tuple]:
+    def get_user_history(self, user_id: str, max_tokens: int = 100000) -> List[Tuple]:
         """
         ดึงประวัติการสนทนาของผู้ใช้แบบเหมาะสมด้วยประสิทธิภาพที่ดีขึ้น
 
         Args:
             user_id: LINE User ID
-            max_tokens: จำนวนโทเค็นสูงสุดในประวัติ
+            max_tokens: จำนวนโทเค็นสูงสุดในประวัติ (สมดุลระหว่างบริบทและประสิทธิภาพ)
 
         Returns:
             List[Tuple]: ประวัติการสนทนาที่เลือก [(id, user_message, bot_response), ...]
@@ -45,7 +45,7 @@ class ChatHistoryDB:
             ORDER BY
                 c.important_flag DESC, -- Important messages first
                 c.timestamp DESC -- Then most recent
-            LIMIT 100 -- Increased limit for better context
+            LIMIT 200 -- เพียงพอสำหรับการดึงบริบทที่สำคัญ
         '''
 
         try:

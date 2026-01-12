@@ -175,7 +175,7 @@ def handle_grok_api_error(e, user_id, user_message):
     if "rate limit" in error_str or "too many requests" in error_str:
         logging.warning(f"ผู้ใช้ {user_id} พบข้อจำกัดอัตรา API")
         return (
-            "ขออภัยค่ะ ระบบกำลังมีการใช้งานสูง กรุณารอสักครู่และลองอีกครั้ง\n"
+            "ขออภัยครับ ระบบกำลังมีการใช้งานสูง กรุณารอสักครู่และลองอีกครั้ง\n"
             "น้องใจดีจะรีบกลับมาช่วยเหลือคุณโดยเร็วที่สุด"
         )
     
@@ -183,7 +183,7 @@ def handle_grok_api_error(e, user_id, user_message):
     elif any(keyword in error_str for keyword in ["timeout", "connection", "network", "socket"]):
         logging.error(f"เกิดปัญหาการเชื่อมต่อสำหรับผู้ใช้ {user_id}: {error_str}")
         return (
-            "ขออภัยค่ะ เกิดปัญหาในการเชื่อมต่อกับระบบ\n"
+            "ขออภัยครับ เกิดปัญหาในการเชื่อมต่อกับระบบ\n"
             "กรุณาลองอีกครั้งในอีกสักครู่ หากยังมีปัญหา โปรดติดต่อผู้ดูแลระบบ"
         )
     
@@ -191,7 +191,7 @@ def handle_grok_api_error(e, user_id, user_message):
     elif any(keyword in error_str for keyword in ["content filter", "filtered", "moderation"]):
         logging.warning(f"เนื้อหาไม่เหมาะสมจากผู้ใช้ {user_id}: {user_message[:100]}...")
         return (
-            "ขออภัยค่ะ ระบบไม่สามารถตอบคำถามนี้ได้เนื่องจากนโยบายการใช้งาน\n"
+            "ขออภัยครับ ระบบไม่สามารถตอบคำถามนี้ได้เนื่องจากนโยบายการใช้งาน\n"
             "กรุณาสอบถามในหัวข้อที่เกี่ยวกับการเลิกสารเสพติดและการบำบัด"
         )
     
@@ -199,7 +199,7 @@ def handle_grok_api_error(e, user_id, user_message):
     else:
         logging.error(f"ข้อผิดพลาด API ที่ไม่คาดคิดสำหรับผู้ใช้ {user_id}: {error_str}")
         return (
-            "ขออภัยค่ะ เกิดข้อผิดพลาดในการประมวลผล\n"
+            "ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล\n"
             "น้องใจดีกำลังหาทางแก้ไข กรุณาลองใหม่อีกครั้งในอีกสักครู่"
         )
 

@@ -63,19 +63,19 @@ class ChatbotError(Exception):
     def _get_default_user_message(self) -> str:
         """Get default user-friendly message based on category and severity"""
         if self.severity == ErrorSeverity.CRITICAL:
-            return "ขออภัยค่ะ เกิดข้อผิดพลาดร้ายแรง กรุณาติดต่อผู้ดูแลระบบ"
+            return "ขออภัยครับ เกิดข้อผิดพลาดร้ายแรง กรุณาติดต่อผู้ดูแลระบบ"
         
         category_messages = {
-            ErrorCategory.DATABASE: "ขออภัยค่ะ เกิดปัญหาในการเข้าถึงข้อมูล กรุณาลองใหม่อีกครั้ง",
-            ErrorCategory.EXTERNAL_API: "ขออภัยค่ะ ระบบกำลังมีการใช้งานสูง กรุณารอสักครู่และลองใหม่",
-            ErrorCategory.NETWORK: "ขออภัยค่ะ เกิดปัญหาการเชื่อมต่อ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
-            ErrorCategory.VALIDATION: "ขออภัยค่ะ ข้อมูลที่ส่งมาไม่ถูกต้อง กรุณาตรวจสอบและลองใหม่",
-            ErrorCategory.AUTHENTICATION: "ขออภัยค่ะ เกิดปัญหาในการยืนยันตัวตน กรุณาลองใหม่อีกครั้ง"
+            ErrorCategory.DATABASE: "ขออภัยครับ เกิดปัญหาในการเข้าถึงข้อมูล กรุณาลองใหม่อีกครั้ง",
+            ErrorCategory.EXTERNAL_API: "ขออภัยครับ ระบบกำลังมีการใช้งานสูง กรุณารอสักครู่และลองใหม่",
+            ErrorCategory.NETWORK: "ขออภัยครับ เกิดปัญหาการเชื่อมต่อ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
+            ErrorCategory.VALIDATION: "ขออภัยครับ ข้อมูลที่ส่งมาไม่ถูกต้อง กรุณาตรวจสอบและลองใหม่",
+            ErrorCategory.AUTHENTICATION: "ขออภัยครับ เกิดปัญหาในการยืนยันตัวตน กรุณาลองใหม่อีกครั้ง"
         }
         
         return category_messages.get(
             self.category,
-            "ขออภัยค่ะ เกิดข้อผิดพลาดในการประมวลผล กรุณาลองใหม่ในอีกสักครู่"
+            "ขออภัยครับ เกิดข้อผิดพลาดในการประมวลผล กรุณาลองใหม่ในอีกสักครู่"
         )
     
     def to_dict(self) -> Dict[str, Any]:
