@@ -89,6 +89,7 @@ PROCESSING_MESSAGES = [
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
 USE_CONVERSATION_ORCHESTRATOR = os.getenv('USE_CONVERSATION_ORCHESTRATOR', '0').lower() in ('1', 'true', 'yes')
+_conversation_orchestrator_enabled = {'value': USE_CONVERSATION_ORCHESTRATOR}
 
 # Legacy error types for backward compatibility - will be migrated to new system
 class ErrorType(Enum):
@@ -198,7 +199,7 @@ try:
     init_session_manager(redis_client, line_bot_api, token_counter, SESSION_TIMEOUT)
     init_risk_assessment(redis_client)
 
-    if USE_CONVERSATION_ORCHESTRATOR:
+    if _conversation_orchestrator_enabled['value']:
         try:
             init_conversation_system(
                 redis_client=redis_client,
@@ -213,7 +214,7 @@ try:
             logging.info("Conversation orchestrator is enabled")
         except Exception as exc:
             logging.error(f"Failed to initialize conversation orchestrator: {exc}")
-            USE_CONVERSATION_ORCHESTRATOR = False
+            _conversation_orchestrator_enabled['value'] = False
 
 except Exception as e:
     logging.critical(f"เกิดข้อผิดพลาดในการเริ่มต้นแอปพลิเคชัน: {str(e)}")
@@ -2644,7 +2645,7 @@ def handle_message(event):
     # ล็อคผู้ใช้และประมวลผลข้อความ
     lock_user(user_id)
     try:
-        if USE_CONVERSATION_ORCHESTRATOR:
+        if _conversation_orchestrator_enabled['value']:
             process_user_message_v2(
                 user_id=user_id,
                 user_message=user_message,

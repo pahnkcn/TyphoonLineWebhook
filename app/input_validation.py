@@ -12,15 +12,16 @@ from marshmallow import Schema, fields, validate, ValidationError, pre_load, pos
 from marshmallow.decorators import validates_schema
 from functools import wraps
 import unicodedata
+from flask import request, jsonify
 
 class SecurityValidationError(ValidationError):
     """Custom validation error for security-related validation failures"""
     
     def __init__(self, message: str, field_name: Optional[str] = None, security_risk: str = "unknown"):
-        super().__init__(message)
+        self.timestamp = datetime.now()
+        super().__init__(message, data={"timestamp": self.timestamp.isoformat()})
         self.field_name = field_name
         self.security_risk = security_risk
-        self.timestamp = datetime.now()
 
 class SanitizedString(fields.String):
     """

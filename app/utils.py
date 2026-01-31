@@ -459,16 +459,18 @@ def summarize_conversation_chunk(chunk):
     if not chunk:
         return ""
 
-    try:
-        grok_client = _get_grok_client()
-        config = _get_config()
+    # Import config values needed for summarization at function start
+    from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
 
-        # สร้างข้อความสนทนา
-        conversation_text = ""
-        for _, msg, resp in chunk:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+    grok_client = _get_grok_client()
+    config = _get_config()
 
-        summary_prompt = f"""
+    # สร้างข้อความสนทนา
+    conversation_text = ""
+    for _, msg, resp in chunk:
+        conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+    summary_prompt = f"""
 โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
 
 {conversation_text}
@@ -483,9 +485,7 @@ def summarize_conversation_chunk(chunk):
 **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
 """
 
-        # Import config values needed for summarization
-        from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
-
+    try:
         text = grok_client.send_chat(
             messages=[
                 SYSTEM_MESSAGES,
@@ -515,32 +515,34 @@ def summarize_conversation_history(history):
     if not history:
         return ""
 
-    try:
-        grok_client = _get_grok_client()
-        config = _get_config()
+    # Import config values needed for summarization at function start
+    from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
 
-        # แบ่งประวัติเป็นส่วนๆ หากมีขนาดใหญ่
-        if len(history) > 20:
-            # แบ่งเป็นชิ้นและสรุปแต่ละชิ้น
-            chunks = chunk_conversation_history(history, chunk_size=10)
-            summaries = []
+    grok_client = _get_grok_client()
+    config = _get_config()
 
-            for chunk in chunks:
-                chunk_summary = summarize_conversation_chunk(chunk)
-                if chunk_summary:
-                    summaries.append(chunk_summary)
+    # แบ่งประวัติเป็นส่วนๆ หากมีขนาดใหญ่
+    if len(history) > 20:
+        # แบ่งเป็นชิ้นและสรุปแต่ละชิ้น
+        chunks = chunk_conversation_history(history, chunk_size=10)
+        summaries = []
 
-            # รวมสรุปทั้งหมด
-            if summaries:
-                combined_summary = "\n".join([f"• {summary}" for summary in summaries])
-                return combined_summary
+        for chunk in chunks:
+            chunk_summary = summarize_conversation_chunk(chunk)
+            if chunk_summary:
+                summaries.append(chunk_summary)
 
-        # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
-        conversation_text = ""
-        for _, msg, resp in history:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+        # รวมสรุปทั้งหมด
+        if summaries:
+            combined_summary = "\n".join([f"• {summary}" for summary in summaries])
+            return combined_summary
 
-        summary_prompt = f"""
+    # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
+    conversation_text = ""
+    for _, msg, resp in history:
+        conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+    summary_prompt = f"""
 โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
 
 {conversation_text}
@@ -555,8 +557,7 @@ def summarize_conversation_history(history):
 ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
 """
 
-        from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
-
+    try:
         text = grok_client.send_chat(
             messages=[
                 SYSTEM_MESSAGES,
