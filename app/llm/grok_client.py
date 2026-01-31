@@ -21,6 +21,27 @@ class GrokAPIError(Exception):
 _DEFAULT_BASE_URL = "https://api.x.ai/v1"
 _DEFAULT_MODEL = os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning")
 
+
+def _filter_unsupported_params(model: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    model_lower = (model or "").lower()
+    if "reasoning" not in model_lower:
+        return params
+
+    unsupported = {
+        "presence_penalty",
+        "presencePenalty",
+        "frequency_penalty",
+        "frequencyPenalty",
+    }
+    removed = [k for k in params.keys() if k in unsupported]
+    if not removed:
+        return params
+
+    filtered = {k: v for k, v in params.items() if k not in unsupported}
+    logging.debug(f"Removed unsupported params for model={model}: {removed}")
+    return filtered
+
+
 # Client connection pooling - reuse connections for better performance
 _sync_client_cache: Dict[Tuple[str, str], OpenAI] = {}
 _async_client_cache: Dict[Tuple[str, str], AsyncOpenAI] = {}
@@ -172,6 +193,8 @@ def send_chat(
     if extra:
         params.update(extra)
 
+    params = _filter_unsupported_params(str(params.get("model", "")), params)
+
     try:
         resp = client.chat.completions.create(**params)
 
@@ -270,6 +293,8 @@ def stream_chat(
         params["frequency_penalty"] = frequency_penalty
     if extra:
         params.update(extra)
+
+    params = _filter_unsupported_params(str(params.get("model", "")), params)
 
     chunks_received = 0
     total_content_length = 0
@@ -391,6 +416,8 @@ async def astream_chat(
     if extra:
         params.update(extra)
 
+    params = _filter_unsupported_params(str(params.get("model", "")), params)
+
     try:
         resp = await client.chat.completions.create(**params)
         # Do not close client explicitly; connection pool is reused by SDK.
@@ -488,6 +515,8 @@ async def astream_chat_iter(
         params["frequency_penalty"] = frequency_penalty
     if extra:
         params.update(extra)
+
+    params = _filter_unsupported_params(str(params.get("model", "")), params)
 
     chunks_received = 0
     total_content_length = 0

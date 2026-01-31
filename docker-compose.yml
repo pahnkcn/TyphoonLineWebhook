@@ -11,7 +11,7 @@ services:
       - MYSQL_HOST=db
       - MYSQL_PORT=3306
       - TZ=Asia/Bangkok
-      - XAI_MODEL=${XAI_MODEL:-grok-4}
+      - XAI_MODEL=${XAI_MODEL:-grok-4-1-fast-reasoning}
     env_file: .env
     depends_on:
       - redis
