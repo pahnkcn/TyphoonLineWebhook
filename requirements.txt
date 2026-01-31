@@ -11,6 +11,8 @@ gunicorn>=21.2.0
 APScheduler>=3.10.1
 requests>=2.31.0
 tiktoken>=0.5.1
+bleach>=6.1.0
+marshmallow>=3.20.0
 
 # Testing Dependencies
 pytest>=8.4.1

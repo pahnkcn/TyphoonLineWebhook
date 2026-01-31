@@ -257,7 +257,7 @@ def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[s
                 formatted_normal.append((i, user_msg, bot_resp))
             summary = ""
             if formatted_normal:
-                from .app_main import summarize_conversation_history
+                from .utils import summarize_conversation_history
                 summary = summarize_conversation_history(formatted_normal)
             new_history = []
             if summary:

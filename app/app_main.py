@@ -38,7 +38,7 @@ from .config import (
     INFO_CONFIG,
     get_dynamic_config
 )
-from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
+from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error, chunk_conversation_history, summarize_conversation_chunk, summarize_conversation_history
 from .llm import grok_client
 from .chat_history_db import ChatHistoryDB
 from .token_counter import TokenCounter
@@ -70,6 +70,7 @@ from .error_handling import (
     ErrorSeverity,
     get_error_handler
 )
+from .conversation.integration import init_conversation_system, process_user_message_v2
 import traceback
 from typing import Optional, List, Dict, Tuple, Any, Set
 from enum import Enum
@@ -87,6 +88,7 @@ PROCESSING_MESSAGES = [
 ]
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
+USE_CONVERSATION_ORCHESTRATOR = os.getenv('USE_CONVERSATION_ORCHESTRATOR', '0').lower() in ('1', 'true', 'yes')
 
 # Legacy error types for backward compatibility - will be migrated to new system
 class ErrorType(Enum):
@@ -195,6 +197,23 @@ try:
     # ตั้งค่าโมดูลจัดการเซสชันและประเมินความเสี่ยง
     init_session_manager(redis_client, line_bot_api, token_counter, SESSION_TIMEOUT)
     init_risk_assessment(redis_client)
+
+    if USE_CONVERSATION_ORCHESTRATOR:
+        try:
+            init_conversation_system(
+                redis_client=redis_client,
+                db=db,
+                line_bot_api=line_bot_api,
+                grok_client=grok_client,
+                token_counter=token_counter,
+                system_prompt=SYSTEM_MESSAGES,
+                app_config=config,
+                token_threshold=TOKEN_THRESHOLD,
+            )
+            logging.info("Conversation orchestrator is enabled")
+        except Exception as exc:
+            logging.error(f"Failed to initialize conversation orchestrator: {exc}")
+            USE_CONVERSATION_ORCHESTRATOR = False
 
 except Exception as e:
     logging.critical(f"เกิดข้อผิดพลาดในการเริ่มต้นแอปพลิเคชัน: {str(e)}")
@@ -587,67 +606,6 @@ def health_check():
             'timestamp': datetime.now().isoformat()
         }), 500
 
-def chunk_conversation_history(history, chunk_size=10):
-    """
-    แบ่งประวัติการสนทนาเป็นส่วนๆ (chunks) เพื่อการสรุปที่มีประสิทธิภาพ
-
-    Args:
-        history (list): ประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-        chunk_size (int): ขนาดของแต่ละส่วน
-
-    Returns:
-        list: รายการของส่วนประวัติการสนทนา
-    """
-    return [history[i:i + chunk_size] for i in range(0, len(history), chunk_size)]
-
-@safe_api_call
-def summarize_conversation_chunk(chunk):
-    """
-    สรุปส่วนของประวัติการสนทนา
-
-    Args:
-        chunk (list): ส่วนของประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-
-    Returns:
-        str: ข้อความสรุป
-    """
-    if not chunk:
-        return ""
-
-    try:
-        # สร้างข้อความสนทนา
-        conversation_text = ""
-        for _, msg, resp in chunk:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
-
-        summary_prompt = f"""
-โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
-
-{conversation_text}
-
-กรุณาสรุปโดยครอบคลุม:
-1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
-2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
-3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
-4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
-5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
-
-**ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
-"""
-
-        text = grok_client.send_chat(
-            messages=[
-                SYSTEM_MESSAGES,
-                {"role": "user", "content": summary_prompt}
-            ],
-            model=config.XAI_MODEL,
-            **SUMMARY_GENERATION_CONFIG,
-        )
-
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_chunk: {str(e)}")
-        return ""
 
 def process_and_optimize_history(user_id, max_tokens=450000):
     """
@@ -771,70 +729,6 @@ def filter_messages_for_api(messages):
     
     return filtered_messages
 
-@safe_api_call
-def summarize_conversation_history(history):
-    """
-    สรุปประวัติการสนทนาให้กระชับ โดยมีการจัดการขนาด
-
-    Args:
-        history (list): รายการประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-
-    Returns:
-        str: ข้อความสรุป
-    """
-    if not history:
-        return ""
-
-    try:
-        # แบ่งประวัติเป็นส่วนๆ หากมีขนาดใหญ่
-        if len(history) > 20:
-            # แบ่งเป็นชิ้นและสรุปแต่ละชิ้น
-            chunks = chunk_conversation_history(history, chunk_size=10)
-            summaries = []
-
-            for chunk in chunks:
-                chunk_summary = summarize_conversation_chunk(chunk)
-                if chunk_summary:
-                    summaries.append(chunk_summary)
-
-            # รวมสรุปทั้งหมด
-            if summaries:
-                combined_summary = "\n".join([f"• {summary}" for summary in summaries])
-                return combined_summary
-
-        # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
-        conversation_text = ""
-        for _, msg, resp in history:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
-
-        summary_prompt = f"""
-โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
-
-{conversation_text}
-
-กรุณาสรุปโดยครอบคลุม:
-1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
-2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
-3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
-4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
-5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
-
-ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
-"""
-
-        text = grok_client.send_chat(
-            messages=[
-                SYSTEM_MESSAGES,
-                {"role": "user", "content": summary_prompt}
-            ],
-            model=config.XAI_MODEL,
-            **SUMMARY_GENERATION_CONFIG,
-        )
-
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_history: {str(e)}")
-        return ""
 
 @safe_api_call
 def summarize_by_topic(history):
@@ -2750,7 +2644,27 @@ def handle_message(event):
     # ล็อคผู้ใช้และประมวลผลข้อความ
     lock_user(user_id)
     try:
-        process_user_message(user_id, user_message, event.reply_token)
+        if USE_CONVERSATION_ORCHESTRATOR:
+            process_user_message_v2(
+                user_id=user_id,
+                user_message=user_message,
+                reply_token=event.reply_token,
+                get_user_context=get_user_context,
+                generate_progress_report=generate_progress_report,
+                is_user_registered=is_user_registered,
+                register_user_with_code=register_user_with_code,
+                check_session_timeout=check_session_timeout,
+                update_last_activity=update_last_activity,
+                check_hospital_inquiry=check_hospital_inquiry,
+                get_hospital_information_message=get_hospital_information_message,
+                start_loading_animation=start_loading_animation,
+                assess_risk=assess_risk,
+                save_progress_data=save_progress_data,
+                clean_ai_response=clean_ai_response,
+                get_dynamic_config=get_dynamic_config,
+            )
+        else:
+            process_user_message(user_id, user_message, event.reply_token)
     finally:
         unlock_user(user_id)
 

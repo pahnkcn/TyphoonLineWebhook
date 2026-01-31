@@ -7,7 +7,7 @@ import html
 import bleach
 import logging
 from datetime import datetime, date
-from typing import Dict, Any, Optional, List, Union, Callable
+from typing import Dict, Any, Optional, List, Union, Callable, Tuple
 from marshmallow import Schema, fields, validate, ValidationError, pre_load, post_load
 from marshmallow.decorators import validates_schema
 from functools import wraps
@@ -405,7 +405,7 @@ class UserMessageSchema(Schema):
 
     user_id = LineUserIdField(required=True)
     message = ThaiTextString(required=True, validate=validate.Length(min=1, max=2000))
-    timestamp = fields.DateTime(missing=datetime.now)
+    timestamp = fields.DateTime(load_default=datetime.now)
     message_type = fields.String(validate=validate.OneOf(['text', 'sticker', 'image', 'audio']))
 
     @validates_schema
@@ -504,7 +504,7 @@ class ConversationSchema(Schema):
     bot_response = ThaiTextString(required=True, validate=validate.Length(max=4000))
     timestamp = fields.DateTime(required=True)
     token_count = fields.Integer(validate=validate.Range(min=0, max=10000))
-    important_flag = fields.Boolean(missing=False)
+    important_flag = fields.Boolean(load_default=False)
     risk_level = fields.String(validate=validate.OneOf(['general', 'medium', 'high', 'low']))
 
 class HealthCheckSchema(Schema):
@@ -512,9 +512,9 @@ class HealthCheckSchema(Schema):
     
     component = fields.String(
         validate=validate.OneOf(['database', 'redis', 'external_api', 'all']),
-        missing='all'
+        load_default='all'
     )
-    detailed = fields.Boolean(missing=False)
+    detailed = fields.Boolean(load_default=False)
 
 class SystemConfigSchema(Schema):
     """Schema for system configuration"""
@@ -522,7 +522,7 @@ class SystemConfigSchema(Schema):
     max_message_length = fields.Integer(validate=validate.Range(min=100, max=5000))
     session_timeout = fields.Integer(validate=validate.Range(min=300, max=86400))  # 5 min to 24 hours
     rate_limit_per_hour = fields.Integer(validate=validate.Range(min=10, max=1000))
-    debug_mode = fields.Boolean(missing=False)
+    debug_mode = fields.Boolean(load_default=False)
 
 # Validation Decorator and Helper Functions
 

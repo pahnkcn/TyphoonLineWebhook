@@ -3,12 +3,31 @@
 รวมฟังก์ชันช่วยเหลือและเดโครเรเตอร์ต่างๆ
 """
 import functools
+import json
 import re
 import logging
 import traceback
 import time
 import requests
-from typing import Callable, Any, TypeVar, cast, Dict
+from typing import Callable, Any, TypeVar, cast, Dict, List, Optional
+
+# Lazy imports for summary functions to avoid circular dependencies
+_grok_client = None
+_config_module = None
+
+def _get_grok_client():
+    global _grok_client
+    if _grok_client is None:
+        from .llm import grok_client
+        _grok_client = grok_client
+    return _grok_client
+
+def _get_config():
+    global _config_module
+    if _config_module is None:
+        from . import config as cfg
+        _config_module = cfg
+    return _config_module
 
 # ตัวแปรประเภทสำหรับฟังก์ชัน
 F = TypeVar('F', bound=Callable[..., Any])
@@ -410,3 +429,144 @@ def get_hospital_information_message():
         "• สามารถสอบถามบริการรักษายาเสพติดได้\n\n"
         "💡 เจ้าหน้าที่จะแนะนำสถานพยาบาลที่ใกล้บ้านคุณที่สุด และมีบริการที่เหมาะสมกับความต้องการของคุณ"
     )
+
+
+def chunk_conversation_history(history, chunk_size=10):
+    """
+    แบ่งประวัติการสนทนาเป็นส่วนๆ (chunks) เพื่อการสรุปที่มีประสิทธิภาพ
+
+    Args:
+        history (list): ประวัติการสนทนา [(id, user_msg, bot_resp), ...]
+        chunk_size (int): ขนาดของแต่ละส่วน
+
+    Returns:
+        list: รายการของส่วนประวัติการสนทนา
+    """
+    return [history[i:i + chunk_size] for i in range(0, len(history), chunk_size)]
+
+
+@safe_api_call
+def summarize_conversation_chunk(chunk):
+    """
+    สรุปส่วนของประวัติการสนทนา
+
+    Args:
+        chunk (list): ส่วนของประวัติการสนทนา [(id, user_msg, bot_resp), ...]
+
+    Returns:
+        str: ข้อความสรุป
+    """
+    if not chunk:
+        return ""
+
+    try:
+        grok_client = _get_grok_client()
+        config = _get_config()
+
+        # สร้างข้อความสนทนา
+        conversation_text = ""
+        for _, msg, resp in chunk:
+            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+        summary_prompt = f"""
+โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
+
+{conversation_text}
+
+กรุณาสรุปโดยครอบคลุม:
+1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
+2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
+3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
+4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
+5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
+
+**ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
+"""
+
+        # Import config values needed for summarization
+        from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
+
+        text = grok_client.send_chat(
+            messages=[
+                SYSTEM_MESSAGES,
+                {"role": "user", "content": summary_prompt}
+            ],
+            model=config.XAI_MODEL,
+            **SUMMARY_GENERATION_CONFIG,
+        )
+
+        return text
+    except Exception as e:
+        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_chunk: {str(e)}")
+        return ""
+
+
+@safe_api_call
+def summarize_conversation_history(history):
+    """
+    สรุปประวัติการสนทนาให้กระชับ โดยมีการจัดการขนาด
+
+    Args:
+        history (list): รายการประวัติการสนทนา [(id, user_msg, bot_resp), ...]
+
+    Returns:
+        str: ข้อความสรุป
+    """
+    if not history:
+        return ""
+
+    try:
+        grok_client = _get_grok_client()
+        config = _get_config()
+
+        # แบ่งประวัติเป็นส่วนๆ หากมีขนาดใหญ่
+        if len(history) > 20:
+            # แบ่งเป็นชิ้นและสรุปแต่ละชิ้น
+            chunks = chunk_conversation_history(history, chunk_size=10)
+            summaries = []
+
+            for chunk in chunks:
+                chunk_summary = summarize_conversation_chunk(chunk)
+                if chunk_summary:
+                    summaries.append(chunk_summary)
+
+            # รวมสรุปทั้งหมด
+            if summaries:
+                combined_summary = "\n".join([f"• {summary}" for summary in summaries])
+                return combined_summary
+
+        # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
+        conversation_text = ""
+        for _, msg, resp in history:
+            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
+
+        summary_prompt = f"""
+โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
+
+{conversation_text}
+
+กรุณาสรุปโดยครอบคลุม:
+1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
+2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
+3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
+4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
+5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
+
+ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
+"""
+
+        from .config import SYSTEM_MESSAGES, SUMMARY_GENERATION_CONFIG
+
+        text = grok_client.send_chat(
+            messages=[
+                SYSTEM_MESSAGES,
+                {"role": "user", "content": summary_prompt}
+            ],
+            model=config.XAI_MODEL,
+            **SUMMARY_GENERATION_CONFIG,
+        )
+
+        return text
+    except Exception as e:
+        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_history: {str(e)}")
+        return ""
