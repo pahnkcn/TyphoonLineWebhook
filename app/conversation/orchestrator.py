@@ -499,7 +499,7 @@ class ConversationOrchestrator:
             
             # Assess risk and save progress
             if assess_risk and save_progress_data:
-                risk_level, keywords = assess_risk(user_message, bot_response)
+                risk_level, keywords = assess_risk(user_message)
                 save_progress_data(user_id, risk_level, keywords)
                 
         except Exception as e:
