@@ -26,6 +26,8 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FollowEvent
 import redis
+import random
+import string
 from random import choice
 from collections import Counter
 import signal
@@ -1831,6 +1833,71 @@ def handle_command_with_processing(user_id, command, reply_token=None):
         send_final_response(user_id, message, reply_token=reply_token)
         return True
 
+    if normalized.startswith('/skipverify'):
+        if not os.getenv('ENABLE_SKIP_VERIFY', '').lower() in ('1', 'true', 'yes'):
+            send_final_response(
+                user_id,
+                "❌ คำสั่งนี้ไม่สามารถใช้งานได้ในขณะนี้",
+                reply_token=reply_token,
+            )
+            return True
+
+        if is_user_registered(user_id):
+            send_final_response(
+                user_id,
+                "✅ คุณได้ลงทะเบียนและยืนยันตัวตนเรียบร้อยแล้ว\n"
+                "ไม่จำเป็นต้องยืนยันอีกครั้ง คุณสามารถใช้บริการของน้องใจดีได้ตามปกติ\n\n"
+                "พิมพ์ /help เพื่อดูคำสั่งและบริการที่มี",
+                reply_token=reply_token,
+            )
+            return True
+
+        try:
+            skip_code = 'SKIP' + ''.join(random.choices(string.digits, k=6))
+
+            insert_query = '''
+                INSERT INTO registration_codes
+                (code, user_id, created_at, verified_at, status, form_data)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            '''
+            now = datetime.now()
+            form_data_json = json.dumps({
+                "full_data": {},
+                "ai_summary": "",
+                "skip_verify": True,
+                "processed_at": now.isoformat()
+            })
+            db_manager.execute_and_commit(
+                insert_query,
+                (skip_code, user_id, now, now, 'verified', form_data_json)
+            )
+
+            # Invalidate registration cache
+            try:
+                redis_client.setex(f"registered:{user_id}", 300, '1')
+            except Exception:
+                pass
+
+            logging.info(f"ผู้ใช้ {user_id} ข้ามการยืนยันตัวตนด้วยคำสั่ง /skipverify (code: {skip_code})")
+
+            send_final_response(
+                user_id,
+                "✅ ข้ามการยืนยันตัวตนสำเร็จ!\n\n"
+                "คุณสามารถเริ่มใช้บริการน้องใจดีได้ทันที\n"
+                "หมายเหตุ: เนื่องจากไม่ได้กรอกแบบประเมิน น้องใจดีจะยังไม่มีข้อมูลบริบทของคุณ "
+                "แต่ยังสามารถช่วยเหลือคุณได้ตามปกติครับ 💚\n\n"
+                "พิมพ์ /help เพื่อดูคำสั่งและบริการที่มี",
+                reply_token=reply_token,
+            )
+        except Exception as e:
+            logging.error(f"เกิดข้อผิดพลาดในการข้ามยืนยันตัวตน: {str(e)}")
+            send_final_response(
+                user_id,
+                "❌ เกิดข้อผิดพลาดในการข้ามการยืนยันตัวตน กรุณาลองใหม่อีกครั้ง",
+                reply_token=reply_token,
+            )
+        return True
+
     response_text = None
 
     if normalized == '/reset':
@@ -2254,7 +2321,7 @@ def handle_message(event):
 
     # ตรวจสอบการลงทะเบียนก่อนประมวลผลข้อความปกติ
     # อนุญาตให้ /verify ผ่านได้แม้ยังไม่ลงทะเบียน เพื่อให้ไปจัดการที่ handle_command_with_processing()
-    if not is_user_registered(user_id) and not user_message.lower().startswith("/verify"):
+    if not is_user_registered(user_id) and not user_message.lower().startswith("/verify") and not user_message.lower().startswith("/skipverify"):
         # ตรวจสอบว่าเคยส่งข้อความลงทะเบียนแล้วหรือไม่
         registration_sent = redis_client.exists(f"registration_sent:{user_id}")
 
