@@ -30,6 +30,8 @@ from .middleware.rate_limiter import init_limiter
 from .config import (
     load_config,
     SYSTEM_MESSAGES,
+    SYSTEM_MESSAGE_CORE,
+    SYSTEM_MESSAGE_SUMMARY,
     GENERATION_CONFIG,
     SUMMARY_GENERATION_CONFIG,
     TOKEN_THRESHOLD,
@@ -70,9 +72,35 @@ from .error_handling import (
     ErrorSeverity,
     get_error_handler
 )
+import hmac
 import traceback
+import concurrent.futures
 from typing import Optional, List, Dict, Tuple, Any, Set
 from enum import Enum
+
+# Shared ThreadPoolExecutor for AI API calls — avoids creating/destroying per request
+_AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# Dashboard API authentication helper
+def _require_dashboard_auth():
+    """Validate dashboard API key from Authorization header or query param.
+    Returns (True, None) if valid, or (False, error_response) if invalid."""
+    dashboard_key = os.getenv('DASHBOARD_API_KEY', '')
+    if not dashboard_key:
+        # If no key configured, allow access (backward compatibility) but log warning
+        logging.warning("DASHBOARD_API_KEY not set — dashboard endpoints are unprotected")
+        return True, None
+    # Check Authorization: Bearer <key> header first
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:]
+        if hmac.compare_digest(token, dashboard_key):
+            return True, None
+    # Fallback: check query parameter
+    token = request.args.get('api_key', '')
+    if token and hmac.compare_digest(token, dashboard_key):
+        return True, None
+    return False, (jsonify({"error": "Unauthorized"}), 401)
 
 # ค่าคงที่ส่วนของการแอพลิเคชัน
 FOLLOW_UP_INTERVALS = [1, 3, 7, 14, 30]  # จำนวนวันในการติดตาม
@@ -326,6 +354,9 @@ def _collect_dashboard_progress_metrics(
 @app.route('/api/dashboard/insights', methods=['GET'])
 def get_dashboard_insights():
     """Summarise conversation and risk insights for care teams."""
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
     try:
         user_limit = request.args.get('limit', default=10, type=int) or 10
         lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
@@ -474,6 +505,9 @@ def get_dashboard_insights():
 @app.route('/api/dashboard/users/<user_id>/history', methods=['GET'])
 def get_dashboard_user_history(user_id: str):
     """Return conversation transcript and risk highlights for a dashboard drill-down."""
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
     if not user_id:
         return jsonify({'error': 'missing_user_id'}), 400
 
@@ -600,7 +634,6 @@ def chunk_conversation_history(history, chunk_size=10):
     """
     return [history[i:i + chunk_size] for i in range(0, len(history), chunk_size)]
 
-@safe_api_call
 def summarize_conversation_chunk(chunk):
     """
     สรุปส่วนของประวัติการสนทนา
@@ -637,7 +670,7 @@ def summarize_conversation_chunk(chunk):
 
         text = grok_client.send_chat(
             messages=[
-                SYSTEM_MESSAGES,
+                SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
             ],
             model=config.XAI_MODEL,
@@ -726,7 +759,6 @@ def process_and_optimize_history(user_id, max_tokens=450000):
         logging.error(f"เกิดข้อผิดพลาดในการปรับปรุงประวัติ: {str(e)}")
         return get_chat_session(user_id)  # ส่งคืนประวัติปกติในกรณีที่มีข้อผิดพลาด
 
-@safe_api_call
 def filter_messages_for_api(messages):
     """
     กรองข้อความที่มี role เป็น 'system_summary' ออกจากการส่งไปยัง API
@@ -771,7 +803,6 @@ def filter_messages_for_api(messages):
     
     return filtered_messages
 
-@safe_api_call
 def summarize_conversation_history(history):
     """
     สรุปประวัติการสนทนาให้กระชับ โดยมีการจัดการขนาด
@@ -824,7 +855,7 @@ def summarize_conversation_history(history):
 
         text = grok_client.send_chat(
             messages=[
-                SYSTEM_MESSAGES,
+                SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
             ],
             model=config.XAI_MODEL,
@@ -836,7 +867,6 @@ def summarize_conversation_history(history):
         logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_history: {str(e)}")
         return ""
 
-@safe_api_call
 def summarize_by_topic(history):
     """
     สรุปประวัติการสนทนาแบ่งตามหัวข้อ
@@ -877,7 +907,7 @@ def summarize_by_topic(history):
         # ส่งไปให้ AI ประมวลผล
         text = grok_client.send_chat(
             messages=[
-                SYSTEM_MESSAGES,
+                SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": topic_prompt}
             ],
             model=config.XAI_MODEL,
@@ -1674,9 +1704,9 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         # 3. เพิ่มข้อความของผู้ใช้
         messages.append({"role": "user", "content": user_message})
         
-        # 4. เรียก AI API พร้อม retry mechanism
+        # 4. เรียก AI API พร้อม retry mechanism (2 retries + grok_client built-in retry = 4 max)
         bot_response = None
-        max_retries = 3
+        max_retries = 2
         retry_count = 0
         
         while retry_count < max_retries and bot_response is None:
@@ -1735,18 +1765,10 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         # 6. เพิ่มข้อความตอบกลับลงในประวัติ
         messages.append({"role": "assistant", "content": bot_response})
         
-        # 7. ประมวลผลและบันทึกข้อมูล (ใช้ transaction-like approach)
-        try:
-            process_conversation_data_safely(user_id, user_message, bot_response, messages)
-        except Exception as e:
-            logging.error(f"เกิดข้อผิดพลาดในการบันทึกข้อมูล: {str(e)}")
-            # ไม่ให้ error นี้ทำให้ผู้ใช้ไม่ได้รับคำตอบ
-            error_occurred = True
-        
-        # 8. จัดการจังหวะเวลา
+        # 7. จัดการจังหวะเวลา (ก่อนส่ง เพื่อให้ animation แสดงครบ)
         handle_response_timing(start_time, animation_success)
         
-        # 9. ส่งการตอบกลับ
+        # 8. ส่งการตอบกลับทันที — ลด latency โดยส่งก่อนบันทึกข้อมูล
         try:
             success = send_final_response(user_id, bot_response, reply_token=reply_token)
             if not success:
@@ -1754,22 +1776,25 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
                     ErrorType.MESSAGE_SEND_ERROR,
                     "Failed to send response to user"
                 )
-                
-            # ถ้าใช้ fallback หรือมี error แจ้งให้ผู้ใช้ทราบ
-            if fallback_response or error_occurred:
-                send_system_notification(user_id, fallback_response is not None, error_occurred)
-                
         except Exception as e:
             logging.critical(f"ไม่สามารถส่งข้อความให้ผู้ใช้ {user_id}: {str(e)}")
-            # นี่คือ critical error - ผู้ใช้จะไม่ได้รับการตอบกลับเลย
             notify_admin_critical_error(user_id, user_message, str(e))
-            
-        # 10. บันทึกเวลาประมวลผล
-        total_time = time.time() - start_time
-        logging.info(f"เวลาประมวลผลทั้งหมดสำหรับผู้ใช้ {user_id}: {total_time:.2f} วินาที")
         
-        # 11. บันทึก metrics
-        record_processing_metrics(user_id, total_time, fallback_response is not None, error_occurred)
+        # 9. ย้ายงาน post-response ไป background thread (ไม่บล็อกผู้ใช้)
+        _post_response_args = {
+            'user_id': user_id,
+            'user_message': user_message,
+            'bot_response': bot_response,
+            'messages': messages.copy(),  # copy เพื่อ thread-safety
+            'start_time': start_time,
+            'fallback_response': fallback_response,
+            'error_occurred': error_occurred,
+        }
+        threading.Thread(
+            target=_post_response_background,
+            kwargs=_post_response_args,
+            daemon=True,
+        ).start()
         
     except ChatbotError as e:
         # จัดการ custom errors
@@ -1780,6 +1805,41 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         logging.critical(f"Unexpected error in process_ai_response: {str(e)}", exc_info=True)
         handle_unexpected_error(e, user_id, user_message, reply_token=reply_token)
 
+
+
+def _post_response_background(
+    user_id: str,
+    user_message: str,
+    bot_response: str,
+    messages: List[Dict[str, str]],
+    start_time: float,
+    fallback_response: Optional[str],
+    error_occurred: bool,
+):
+    """Background thread: save conversation data, metrics, and send notifications.
+
+    Runs after the response has already been sent to the user so that
+    DB/Redis writes and follow-up scheduling don't add to perceived latency.
+    """
+    try:
+        # บันทึกข้อมูลการสนทนา
+        try:
+            process_conversation_data_safely(user_id, user_message, bot_response, messages)
+        except Exception as e:
+            logging.error(f"[background] เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
+            error_occurred = True
+
+        # แจ้งเตือนถ้าใช้ fallback หรือมี error
+        if fallback_response or error_occurred:
+            send_system_notification(user_id, fallback_response is not None, error_occurred)
+
+        # บันทึกเวลาประมวลผลและ metrics
+        total_time = time.time() - start_time
+        logging.info(f"เวลาประมวลผลทั้งหมดสำหรับผู้ใช้ {user_id}: {total_time:.2f} วินาที")
+        record_processing_metrics(user_id, total_time, fallback_response is not None, error_occurred)
+
+    except Exception as e:
+        logging.error(f"[background] Unexpected error in post-response processing for {user_id}: {e}")
 
 
 def history_to_messages(history: List[Tuple], max_pairs: int = DB_RESTORE_MESSAGE_PAIRS) -> Tuple[List[Dict[str, str]], Set[int]]:
@@ -1872,8 +1932,6 @@ def create_minimal_session(user_context: Optional[str]) -> List[Dict[str, str]]:
 
 def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30) -> str:
     """เรียก xAI Grok API พร้อม timeout และคืนข้อความตอบกลับ"""
-    import concurrent.futures
-
     filtered_messages = filter_messages_for_api(messages)
     effective_timeout = _calculate_adaptive_timeout(filtered_messages, base_timeout=timeout)
 
@@ -1887,19 +1945,26 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     # เลือก config แบบ dynamic ตามบริบท
     dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
+    # ใช้ SYSTEM_MESSAGE_CORE แทน SYSTEM_MESSAGES เต็ม เพื่อลด token overhead
+    # ตรวจสอบว่า filtered_messages มี system message อยู่แล้วหรือไม่ เพื่อไม่ให้ซ้ำซ้อน
+    has_system_msg = any(msg.get("role") == "system" for msg in filtered_messages)
+    if has_system_msg:
+        api_messages = filtered_messages
+    else:
+        api_messages = [SYSTEM_MESSAGE_CORE] + filtered_messages
+
     def _call() -> str:
         return grok_client.send_chat(
-            messages=[SYSTEM_MESSAGES] + filtered_messages,
+            messages=api_messages,
             model=config.XAI_MODEL,
             **dynamic_config,
         )
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(_call)
-        try:
-            return future.result(timeout=effective_timeout)
-        except concurrent.futures.TimeoutError:
-            raise requests.exceptions.Timeout(f"AI API timeout after {effective_timeout} seconds")
+    future = _AI_EXECUTOR.submit(_call)
+    try:
+        return future.result(timeout=effective_timeout)
+    except concurrent.futures.TimeoutError:
+        raise requests.exceptions.Timeout(f"AI API timeout after {effective_timeout} seconds")
 
 
 def _calculate_adaptive_timeout(filtered_messages: List[Dict[str, str]], base_timeout: int = 30) -> int:
@@ -1910,7 +1975,7 @@ def _calculate_adaptive_timeout(filtered_messages: List[Dict[str, str]], base_ti
     char_count = 0
 
     try:
-        payload = [SYSTEM_MESSAGES] + filtered_messages
+        payload = [SYSTEM_MESSAGE_CORE] + filtered_messages
         if token_counter is not None:
             token_count = token_counter.count_message_tokens(payload)
     except Exception as token_error:
@@ -2034,8 +2099,8 @@ def send_system_notification(user_id: str, used_fallback: bool, had_error: bool)
         time.sleep(2)
         try:
             line_bot_api.push_message(user_id, TextSendMessage(text=message))
-        except:
-            pass  # ไม่ต้องทำอะไรถ้าส่งไม่ได้
+        except Exception as e:
+            logging.debug(f"Failed to send system notification to {user_id}: {e}")
             
     threading.Thread(target=send_delayed, daemon=True).start()
 
@@ -2117,10 +2182,14 @@ def queue_for_retry(operation_type: str, data: dict):
         }))
         # ตั้ง expiry 24 ชั่วโมง
         redis_client.expire(retry_key, 86400)
-    except:
+    except Exception as e:
+        logging.warning(f"Failed to queue for retry ({operation_type}): {e}")
         # ถ้า Redis ไม่ทำงาน บันทึกลงไฟล์
-        with open(f"retry_{operation_type}_{datetime.now().strftime('%Y%m%d')}.log", 'a') as f:
-            f.write(json.dumps(data) + '\n')
+        try:
+            with open(f"retry_{operation_type}_{datetime.now().strftime('%Y%m%d')}.log", 'a') as f:
+                f.write(json.dumps(data) + '\n')
+        except Exception:
+            logging.error(f"Failed to write retry log for {operation_type}")
 
 
 def record_processing_metrics(user_id: str, processing_time: float, used_fallback: bool, had_error: bool):
@@ -2146,8 +2215,8 @@ def record_processing_metrics(user_id: str, processing_time: float, used_fallbac
         if had_error:
             redis_client.incr('metrics:errors_occurred')
             
-    except:
-        pass  # Metrics เป็น nice-to-have, ไม่ให้กระทบ main flow
+    except Exception as e:
+        logging.debug(f"Failed to record processing metrics: {e}")  # Metrics เป็น nice-to-have
 
 
 def notify_admin_critical_error(user_id: str, user_message: str, error: str):
@@ -2202,8 +2271,8 @@ def send_rate_limit_notification(user_id: str, wait_time: int):
             "ใจดีจะรีบกลับมาคุยกับคุณโดยเร็วที่สุดนะครับ 💚"
         )
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
-    except:
-        pass  # ถ้าส่งไม่ได้ก็ไม่เป็นไร
+    except Exception as e:
+        logging.warning(f"Failed to send rate limit notification to {user_id}: {e}")
 
 
 def prepare_conversation_context(messages, optimized_history, used_history_ids: Optional[Set[int]] = None):
@@ -2447,38 +2516,9 @@ def handle_response_timing(start_time, animation_success):
     # ถ้าเรามีการเคลื่อนไหวที่สำเร็จและการตอบสนอง API กลับมาอย่างรวดเร็ว
     # เพิ่มการหน่วงเวลาเล็กน้อยเพื่อให้แน่ใจว่าผู้ใช้เห็นภาพเคลื่อนไหวเป็นระยะเวลาที่เหมาะสม
     # แต่ไม่นานเกินไปที่จะทำให้เกิดความหงุดหงิด (ขั้นต่ำ 5 วินาที สูงสุด 15 วินาที)
-    if animation_success and elapsed_time < 5:
-        # เพิ่มการหน่วงเวลาเล็กน้อยเพื่อให้แน่ใจว่าการเคลื่อนไหวจะถูกมองเห็นเป็นเวลาอย่างน้อย 5 วินาที
-        time.sleep(5 - elapsed_time)
-
-@safe_api_call
-def generate_ai_response(messages) -> str:
-    """สร้างการตอบกลับด้วย AI โดยมีการจัดการข้อผิดพลาด (xAI Grok)"""
-    try:
-        filtered_messages = filter_messages_for_api(messages)
-
-        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
-        user_message = ""
-        for msg in reversed(filtered_messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-
-        # เลือก config แบบ dynamic ตามบริบท
-        dynamic_config = get_dynamic_config(user_message, filtered_messages)
-
-        text = grok_client.send_chat(
-            messages=[SYSTEM_MESSAGES] + filtered_messages,
-            model=config.XAI_MODEL,
-            **dynamic_config,
-        )
-        if not text:
-            logging.error("ได้รับการตอบกลับที่ไม่ถูกต้องจาก xAI Grok API")
-            raise ValueError("Invalid response from xAI Grok API")
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดในการสร้างการตอบกลับ AI: {str(e)}")
-        raise
+    if animation_success and elapsed_time < 2:
+        # หน่วงเล็กน้อยเพื่อให้ animation แสดงสักครู่ แต่ไม่นานเกินไป
+        time.sleep(2 - elapsed_time)
 
 # เส้นทาง Flask
 @app.route("/callback", methods=['POST'])
@@ -2489,7 +2529,7 @@ def callback():
 
     # รับเนื้อหาคำขอเป็นข้อความ
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
+    app.logger.debug("Request body received (length: %d)", len(body))
 
     try:
         handler.handle(body, signature)
@@ -2546,9 +2586,13 @@ def process_ai_summary_async(code, full_form_data):
 def add_verification_code():
     """API endpoint รับรหัสยืนยันและข้อมูล form จาก Google Apps Script"""
 
-    # ตรวจสอบการรับรอง API key
+    # ตรวจสอบการรับรอง API key (ใช้ hmac.compare_digest ป้องกัน timing attack)
+    expected_key = os.getenv('FORM_WEBHOOK_KEY', '')
+    if not expected_key:
+        logging.error("FORM_WEBHOOK_KEY environment variable is not set")
+        return jsonify({"success": False, "error": "Server configuration error"}), 500
     api_key = request.json.get('api_key', '')
-    if api_key != os.getenv('FORM_WEBHOOK_KEY', 'your_secret_key_here'):
+    if not hmac.compare_digest(api_key, expected_key):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     # รับข้อมูลจาก request
@@ -2606,7 +2650,7 @@ def add_verification_code():
 
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการบันทึกรหัสยืนยัน: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "Internal server error"}), 500
 
 def check_redis_health():
     """ตรวจสอบการเชื่อมต่อ Redis"""
@@ -2777,26 +2821,33 @@ def handle_follow(event):
 scheduler = BackgroundScheduler()
 
 def shutdown_scheduler(wait=True, reason="unknown"):
-    """�Դ��ǡ�˹���âͧ APScheduler ���ҧ��ʹ���"""
+    """ปิดตัวกำหนดการของ APScheduler อย่างปลอดภัย"""
     if not scheduler.running:
-        logging.debug(f"������ûԴ��ǡ�˹���� ({reason}): �ѧ����������������ش����")
+        logging.debug(f"ข้ามการปิดตัวกำหนดการ ({reason}): ยังไม่ได้เริ่มทำงาน")
         return
     try:
         scheduler.shutdown(wait=wait)
-        logging.info(f"�Դ��ǡ�˹�������º���� ({reason})")
+        logging.info(f"ปิดตัวกำหนดการเรียบร้อย ({reason})")
     except SchedulerNotRunningError:
-        logging.debug(f"��ǡ�˹���ö١�Դ����� ({reason})")
+        logging.debug(f"ตัวกำหนดการถูกปิดแล้ว ({reason})")
     except Exception as exc:
-        logging.error(f"�Դ��ͼԴ��Ҵ㹡�ûԴ��ǡ�˹���� ({reason}): {exc}")
+        logging.error(f"เกิดข้อผิดพลาดในการปิดตัวกำหนดการ ({reason}): {exc}")
 
 # เพิ่มงานตัวกำหนดการ
+_scheduler_initialized = False
+
 def init_scheduler():
+    global _scheduler_initialized
+    if _scheduler_initialized:
+        logging.debug("Scheduler already initialized, skipping")
+        return
+    _scheduler_initialized = True
     scheduler.add_job(check_and_send_follow_ups, 'interval', minutes=30)
     scheduler.start()
     logging.info("ตัวกำหนดการเริ่มต้นแล้ว ตรวจสอบการติดตามทุก 30 นาที")
 
     # การจัดการการปิดอย่างถูกต้อง
-    atexit.register(lambda: scheduler.shutdown())
+    atexit.register(lambda: shutdown_scheduler(reason='atexit'))
 
 # ตัวจัดการการปิดอย่างสง่างาม
 def handle_shutdown(sig=None, frame=None):
