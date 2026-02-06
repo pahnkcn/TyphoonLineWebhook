@@ -81,24 +81,26 @@ from enum import Enum
 # Shared ThreadPoolExecutor for AI API calls — avoids creating/destroying per request
 _AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# Dashboard API authentication helper
+# Dashboard API authentication — read key once at module load
+_DASHBOARD_API_KEY: str = os.getenv('DASHBOARD_API_KEY', '')
+if not _DASHBOARD_API_KEY:
+    logging.warning("DASHBOARD_API_KEY not set — dashboard endpoints are unprotected")
+
 def _require_dashboard_auth():
     """Validate dashboard API key from Authorization header or query param.
     Returns (True, None) if valid, or (False, error_response) if invalid."""
-    dashboard_key = os.getenv('DASHBOARD_API_KEY', '')
-    if not dashboard_key:
-        # If no key configured, allow access (backward compatibility) but log warning
-        logging.warning("DASHBOARD_API_KEY not set — dashboard endpoints are unprotected")
+    if not _DASHBOARD_API_KEY:
         return True, None
     # Check Authorization: Bearer <key> header first
     auth_header = request.headers.get('Authorization', '')
     if auth_header.startswith('Bearer '):
         token = auth_header[7:]
-        if hmac.compare_digest(token, dashboard_key):
+        if hmac.compare_digest(token, _DASHBOARD_API_KEY):
             return True, None
-    # Fallback: check query parameter
+    # Fallback: check query parameter (deprecated — prefer Authorization header)
     token = request.args.get('api_key', '')
-    if token and hmac.compare_digest(token, dashboard_key):
+    if token and hmac.compare_digest(token, _DASHBOARD_API_KEY):
+        logging.warning("Dashboard API key passed via query parameter — use Authorization header instead")
         return True, None
     return False, (jsonify({"error": "Unauthorized"}), 401)
 
@@ -1848,20 +1850,22 @@ def _post_response_background(
     """
     try:
         # บันทึกข้อมูลการสนทนา
+        save_failed = False
         try:
             process_conversation_data_safely(user_id, user_message, bot_response, messages)
         except Exception as e:
             logging.error(f"[background] เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
-            error_occurred = True
+            save_failed = True
 
         # แจ้งเตือนถ้าใช้ fallback หรือมี error
-        if fallback_response or error_occurred:
-            send_system_notification(user_id, fallback_response is not None, error_occurred)
+        effective_error = error_occurred or save_failed
+        if fallback_response or effective_error:
+            send_system_notification(user_id, fallback_response is not None, effective_error)
 
         # บันทึกเวลาประมวลผลและ metrics
         total_time = time.time() - start_time
         logging.info(f"เวลาประมวลผลทั้งหมดสำหรับผู้ใช้ {user_id}: {total_time:.2f} วินาที")
-        record_processing_metrics(user_id, total_time, fallback_response is not None, error_occurred)
+        record_processing_metrics(user_id, total_time, fallback_response is not None, effective_error)
 
     except Exception as e:
         logging.error(f"[background] Unexpected error in post-response processing for {user_id}: {e}")
@@ -1947,7 +1951,7 @@ def add_context_to_messages(messages: List[Dict[str, str]], user_context: str):
 
 def create_minimal_session(user_context: Optional[str]) -> List[Dict[str, str]]:
     """สร้างเซสชันขั้นต่ำเมื่อไม่สามารถโหลดประวัติได้"""
-    messages = [SYSTEM_MESSAGES]
+    messages = [SYSTEM_MESSAGE_CORE]
     
     if user_context:
         add_context_to_messages(messages, user_context)
@@ -1958,7 +1962,16 @@ def create_minimal_session(user_context: Optional[str]) -> List[Dict[str, str]]:
 def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30) -> str:
     """เรียก xAI Grok API พร้อม timeout และคืนข้อความตอบกลับ"""
     filtered_messages = filter_messages_for_api(messages)
-    effective_timeout = _calculate_adaptive_timeout(filtered_messages, base_timeout=timeout)
+
+    # ใช้ SYSTEM_MESSAGE_CORE แทน SYSTEM_MESSAGES เต็ม เพื่อลด token overhead
+    # ตรวจสอบว่า filtered_messages มี system message อยู่แล้วหรือไม่ เพื่อไม่ให้ซ้ำซ้อน
+    has_system_msg = any(msg.get("role") == "system" for msg in filtered_messages)
+    if has_system_msg:
+        api_messages = filtered_messages
+    else:
+        api_messages = [SYSTEM_MESSAGE_CORE] + filtered_messages
+
+    effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
 
     # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
     user_message = ""
@@ -1969,14 +1982,6 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
 
     # เลือก config แบบ dynamic ตามบริบท
     dynamic_config = get_dynamic_config(user_message, filtered_messages)
-
-    # ใช้ SYSTEM_MESSAGE_CORE แทน SYSTEM_MESSAGES เต็ม เพื่อลด token overhead
-    # ตรวจสอบว่า filtered_messages มี system message อยู่แล้วหรือไม่ เพื่อไม่ให้ซ้ำซ้อน
-    has_system_msg = any(msg.get("role") == "system" for msg in filtered_messages)
-    if has_system_msg:
-        api_messages = filtered_messages
-    else:
-        api_messages = [SYSTEM_MESSAGE_CORE] + filtered_messages
 
     def _call() -> str:
         return grok_client.send_chat(
@@ -1992,7 +1997,7 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
         raise requests.exceptions.Timeout(f"AI API timeout after {effective_timeout} seconds")
 
 
-def _calculate_adaptive_timeout(filtered_messages: List[Dict[str, str]], base_timeout: int = 30) -> int:
+def _calculate_adaptive_timeout(api_messages: List[Dict[str, str]], base_timeout: int = 30) -> int:
     """คำนวณ timeout ตามขนาดข้อความเพื่อรองรับบริบทที่ยาวขึ้น"""
     max_timeout = max(base_timeout, 120)
 
@@ -2000,14 +2005,13 @@ def _calculate_adaptive_timeout(filtered_messages: List[Dict[str, str]], base_ti
     char_count = 0
 
     try:
-        payload = [SYSTEM_MESSAGE_CORE] + filtered_messages
         if token_counter is not None:
-            token_count = token_counter.count_message_tokens(payload)
+            token_count = token_counter.count_message_tokens(api_messages)
     except Exception as token_error:
         logging.debug(f"Adaptive timeout token count failed: {token_error}")
 
     try:
-        char_count = sum(len(message.get('content', '')) for message in filtered_messages)
+        char_count = sum(len(message.get('content', '')) for message in api_messages)
     except Exception as length_error:
         logging.debug(f"Adaptive timeout length calculation failed: {length_error}")
 
@@ -2064,7 +2068,7 @@ def process_conversation_data_safely(user_id: str, user_message: str, bot_respon
             'user_id': user_id,
             'user_message': user_message,
             'bot_response': bot_response,
-            'timestamp': datetime.now(),
+            'timestamp': datetime.now().isoformat(),
             'messages': messages.copy()
         }
         
@@ -2879,11 +2883,14 @@ def handle_shutdown(sig=None, frame=None):
     logging.info("กำลังปิดแอปพลิเคชัน...")
 
     # ปิดตัวกำหนดการ
+    shutdown_scheduler(reason='signal')
+
+    # ปิด ThreadPoolExecutor
     try:
-        scheduler.shutdown()
-        logging.info("ปิดตัวกำหนดการเรียบร้อย")
+        _AI_EXECUTOR.shutdown(wait=False)
+        logging.info("ปิด AI executor เรียบร้อย")
     except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดในการปิดตัวกำหนดการ: {str(e)}")
+        logging.error(f"เกิดข้อผิดพลาดในการปิด AI executor: {str(e)}")
 
     # ปิดการเชื่อมต่อ Redis
     try:
