@@ -2,7 +2,9 @@
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Tuple, List
+from typing import Dict, List, Tuple, Union
+
+from .models import RiskAssessmentResult
 
 redis_client = None
 
@@ -103,11 +105,13 @@ def init_risk_assessment(redis_instance) -> None:
     redis_client = redis_instance
 
 
-def assess_risk(message: str) -> Tuple[str, List[str]]:
+def assess_risk(message: str) -> RiskAssessmentResult:
     """Assess risk level from message.
 
     ระดับความเสี่ยงจะถูกยกระดับเป็น "high" หากพบคำความเสี่ยงระดับสูง
     หรือพบคำความเสี่ยงระดับปานกลางหลายคำในข้อความเดียวกัน
+
+    Returns a RiskAssessmentResult (supports tuple unpacking: level, keywords = assess_risk(msg)).
     """
     message = message.lower()
     matched_keywords: List[str] = []
@@ -118,18 +122,18 @@ def assess_risk(message: str) -> Tuple[str, List[str]]:
             matched_keywords.append(keyword)
 
     if matched_keywords:
-        return "high", matched_keywords
+        return RiskAssessmentResult("high", matched_keywords)
 
     # ตรวจหาคำความเสี่ยงปานกลาง
     medium_matches = [kw for kw in RISK_KEYWORDS["medium_risk"] if kw in message]
     matched_keywords.extend(medium_matches)
 
     if len(medium_matches) >= MEDIUM_RISK_THRESHOLD:
-        return "high", matched_keywords
+        return RiskAssessmentResult("high", matched_keywords)
     elif medium_matches:
-        return "medium", matched_keywords
+        return RiskAssessmentResult("medium", matched_keywords)
 
-    return GENERAL_RISK_LEVEL, matched_keywords
+    return RiskAssessmentResult(GENERAL_RISK_LEVEL, matched_keywords)
 
 
 def save_progress_data(user_id: str, risk_level: str, keywords: List[str]) -> None:

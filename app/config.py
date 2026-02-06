@@ -96,6 +96,30 @@ def load_config():
             print(f"ข้อผิดพลาด: {var} ต้องเป็นตัวเลข")
             sys.exit(1)
     
+    # ตรวจสอบ LOG_LEVEL ที่ถูกต้อง
+    valid_log_levels = {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'}
+    log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+    if log_level not in valid_log_levels:
+        print(f"คำเตือน: LOG_LEVEL '{log_level}' ไม่ถูกต้อง ใช้ค่าเริ่มต้น INFO (ค่าที่รองรับ: {', '.join(sorted(valid_log_levels))})")
+        os.environ['LOG_LEVEL'] = 'INFO'
+
+    # ตรวจสอบค่า placeholder ในโหมด production
+    environment = os.getenv('ENVIRONMENT', 'development')
+    if environment == 'production':
+        placeholder_patterns = ['your_', 'change_this', 'example', 'placeholder', 'xxx']
+        sensitive_vars = {
+            'LINE_CHANNEL_ACCESS_TOKEN': os.getenv('LINE_CHANNEL_ACCESS_TOKEN', ''),
+            'LINE_CHANNEL_SECRET': os.getenv('LINE_CHANNEL_SECRET', ''),
+            'XAI_API_KEY': os.getenv('XAI_API_KEY', ''),
+            'MYSQL_PASSWORD': os.getenv('MYSQL_PASSWORD', ''),
+            'DASHBOARD_API_KEY': os.getenv('DASHBOARD_API_KEY', ''),
+            'FORM_WEBHOOK_KEY': os.getenv('FORM_WEBHOOK_KEY', ''),
+        }
+        for var_name, var_value in sensitive_vars.items():
+            if any(p in var_value.lower() for p in placeholder_patterns):
+                logging.critical(f"SECURITY: {var_name} ดูเหมือนค่า placeholder ในโหมด production! กรุณาตั้งค่าที่ถูกต้อง")
+                sys.exit(1)
+
     # สร้างออบเจ็กต์การตั้งค่า
     config = Config(
         LINE_CHANNEL_ACCESS_TOKEN=os.getenv('LINE_CHANNEL_ACCESS_TOKEN'),
@@ -109,12 +133,13 @@ def load_config():
         MYSQL_USER=os.getenv('MYSQL_USER'),
         MYSQL_PASSWORD=os.getenv('MYSQL_PASSWORD'),
         MYSQL_DB=os.getenv('MYSQL_DB'),
-        ENVIRONMENT=os.getenv('ENVIRONMENT'),
+        ENVIRONMENT=environment,
         LOG_LEVEL=os.getenv('LOG_LEVEL'),
         PORT=int(os.getenv('PORT')),
         XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-reasoning')
     )
-    
+
+    logging.info(f"โหลดการตั้งค่าสำเร็จ (สภาพแวดล้อม: {environment}, โมเดล: {config.XAI_MODEL})")
     return config
 
 # ระบบข้อความสำหรับโมเดล

@@ -7,15 +7,17 @@ from typing import List, Dict, Tuple
 redis_client = None
 line_bot_api = None
 token_counter = None
+_config = None
 SESSION_TIMEOUT = 604800
 
-def init_session_manager(redis_instance, line_api, token_counter_instance, session_timeout: int = 604800):
+def init_session_manager(redis_instance, line_api, token_counter_instance, session_timeout: int = 604800, config=None):
     """Initialize session manager dependencies."""
-    global redis_client, line_bot_api, token_counter, SESSION_TIMEOUT
+    global redis_client, line_bot_api, token_counter, SESSION_TIMEOUT, _config
     redis_client = redis_instance
     line_bot_api = line_api
     token_counter = token_counter_instance
     SESSION_TIMEOUT = session_timeout
+    _config = config
 
 
 def get_chat_session(user_id: str) -> List[Dict[str, str]]:
@@ -257,8 +259,8 @@ def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[s
                 formatted_normal.append((i, user_msg, bot_resp))
             summary = ""
             if formatted_normal:
-                from .app_main import summarize_conversation_history
-                summary = summarize_conversation_history(formatted_normal)
+                from .services.context_manager import summarize_conversation_history as _summarize
+                summary = _summarize(formatted_normal, _config)
             new_history = []
             if summary:
                 # ใช้ role พิเศษสำหรับการสรุปที่ไม่แสดงให้ผู้ใช้เห็น

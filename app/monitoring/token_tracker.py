@@ -144,6 +144,8 @@ class TokenUsageTracker:
         try:
             # Increment daily totals
             pipe = self.redis.pipeline()
+            if pipe is None:
+                return
 
             pipe.hincrby(f"token_usage:{date}", "total_requests", 1)
             pipe.hincrby(f"token_usage:{date}", "total_input_tokens", metrics['input_tokens'])

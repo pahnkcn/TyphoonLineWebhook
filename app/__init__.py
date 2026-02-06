@@ -11,7 +11,7 @@ __version__ = '1.0.0'
 # ตั้งค่าการบันทึกข้อมูล พร้อมหมุนไฟล์เมื่อขนาดเกิน 5MB
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
-    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
+    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO'), logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         RotatingFileHandler('logs/app.log', maxBytes=5 * 1024 * 1024, backupCount=3),

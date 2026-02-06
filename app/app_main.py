@@ -6,6 +6,16 @@ import os
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+try:
+    from pythonjsonlogger.json import JsonFormatter as _JsonFormatter
+    _HAS_JSON_LOGGER = True
+except ImportError:
+    try:
+        from pythonjsonlogger import jsonlogger
+        _JsonFormatter = jsonlogger.JsonFormatter
+        _HAS_JSON_LOGGER = True
+    except ImportError:
+        _HAS_JSON_LOGGER = False
 import requests
 import time
 import threading
@@ -70,8 +80,10 @@ from .error_handling import (
     ChatbotError,
     ErrorCategory,
     ErrorSeverity,
+    CircuitBreaker,
     get_error_handler
 )
+from .monitoring.token_tracker import init_token_tracker, track_grok_call
 import hmac
 import traceback
 import concurrent.futures
@@ -79,7 +91,23 @@ from typing import Optional, List, Dict, Tuple, Any, Set
 from enum import Enum
 
 # Shared ThreadPoolExecutor for AI API calls — avoids creating/destroying per request
-_AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+_AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv('AI_EXECUTOR_WORKERS', '4'))
+)
+
+# Circuit breakers สำหรับป้องกัน cascading failures
+_xai_circuit_breaker = CircuitBreaker(
+    name='xai_api',
+    failure_threshold=5,
+    timeout=300,  # 5 นาที
+    expected_exception=(Exception,)
+)
+_line_circuit_breaker = CircuitBreaker(
+    name='line_api',
+    failure_threshold=3,
+    timeout=180,  # 3 นาที
+    expected_exception=(Exception,)
+)
 
 # Dashboard API authentication — read key once at module load
 _DASHBOARD_API_KEY: str = os.getenv('DASHBOARD_API_KEY', '')
@@ -118,15 +146,6 @@ PROCESSING_MESSAGES = [
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
 
-# Legacy error types for backward compatibility - will be migrated to new system
-class ErrorType(Enum):
-    """Legacy error types - use ErrorCategory instead"""
-    CONTEXT_LOAD_ERROR = "context_load_error"
-    TOKEN_MANAGEMENT_ERROR = "token_management_error"
-    AI_API_ERROR = "ai_api_error"
-    MESSAGE_SEND_ERROR = "message_send_error"
-    DATABASE_ERROR = "database_error"
-    UNKNOWN_ERROR = "unknown_error"
 
 # สร้างอินสแตนซ์แอป Flask
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -137,13 +156,26 @@ app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
 
 # ตั้งค่าการบันทึกข้อมูลและหมุนไฟล์เมื่อขนาดเกิน 5MB
 os.makedirs('logs', exist_ok=True)
+
+_log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO'), logging.INFO)
+_file_handler = RotatingFileHandler('logs/app.log', maxBytes=5 * 1024 * 1024, backupCount=3)
+_stream_handler = logging.StreamHandler()
+
+if _HAS_JSON_LOGGER and os.getenv('ENVIRONMENT', 'development') == 'production':
+    _json_formatter = _JsonFormatter(
+        '%(asctime)s %(name)s %(levelname)s %(message)s',
+        rename_fields={'asctime': 'timestamp', 'levelname': 'level'},
+    )
+    _file_handler.setFormatter(_json_formatter)
+    _stream_handler.setFormatter(_json_formatter)
+else:
+    _plain_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    _file_handler.setFormatter(_plain_formatter)
+    _stream_handler.setFormatter(_plain_formatter)
+
 logging.basicConfig(
-    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler('logs/app.log', maxBytes=5 * 1024 * 1024, backupCount=3),
-        logging.StreamHandler()
-    ]
+    level=_log_level,
+    handlers=[_file_handler, _stream_handler]
 )
 
 # โหลดการตั้งค่าและตัวแปรสภาพแวดล้อม
@@ -151,16 +183,20 @@ config = load_config()
 
 # เริ่มต้นเซอร์วิสภายนอก
 try:
-    # เริ่มต้น Redis
-    redis_client = redis.Redis(
+    # เริ่มต้น Redis ด้วย ResilientRedisClient (auto-reconnect + in-memory fallback)
+    from .services.redis_client import ResilientRedisClient
+    redis_client = ResilientRedisClient(
         host=config.REDIS_HOST,
         port=config.REDIS_PORT,
         db=config.REDIS_DB,
         decode_responses=True,
         socket_timeout=5,
-        socket_connect_timeout=5
+        socket_connect_timeout=5,
+        max_reconnect_attempts=5,
+        base_backoff=1.0,
+        fallback_cache_size=1000,
+        health_check_interval=30,
     )
-    redis_client.ping()  # ตรวจสอบการเชื่อมต่อ
 
     # เริ่มต้น Line API
     line_bot_api = LineBotApi(config.LINE_CHANNEL_ACCESS_TOKEN)
@@ -223,8 +259,23 @@ try:
     db = ChatHistoryDB(db_manager)
 
     # ตั้งค่าโมดูลจัดการเซสชันและประเมินความเสี่ยง
-    init_session_manager(redis_client, line_bot_api, token_counter, SESSION_TIMEOUT)
+    init_session_manager(redis_client, line_bot_api, token_counter, SESSION_TIMEOUT, config=config)
     init_risk_assessment(redis_client)
+
+    # เริ่มต้นระบบติดตามการใช้โทเค็น
+    init_token_tracker(redis_client)
+
+    # เริ่มต้นระบบแจ้งเตือน admin
+    from .services.admin_alerting import init_admin_alerting
+    init_admin_alerting()
+
+    # เริ่มต้นระบบจัดการข้อมูลผู้ใช้ (PDPA compliance)
+    from .services.data_management import init_data_management
+    init_data_management(db_manager, redis_client)
+
+    # เริ่มต้นระบบเช็คอินเชิงรุก
+    from .services.proactive_checkin import init_proactive_checkin
+    init_proactive_checkin(db_manager, redis_client, line_bot_api)
 
 except Exception as e:
     logging.critical(f"เกิดข้อผิดพลาดในการเริ่มต้นแอปพลิเคชัน: {str(e)}")
@@ -233,360 +284,11 @@ except Exception as e:
 # เน€เธฃเธดเนเธกเธ•เนเธ rate limiter
 limiter = init_limiter(app)
 
-@limiter.exempt
-@app.route('/dashboard', methods=['GET'])
-def dashboard_page():
-    return render_template('dashboard.html')
+# Register dashboard Blueprint
+from .routes.dashboard import dashboard_bp, init_dashboard
+init_dashboard(db, db_manager, redis_client, GENERAL_RISK_LEVEL)
+app.register_blueprint(dashboard_bp)
 
-
-
-
-
-
-def _parse_progress_timestamp(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            if value.endswith('Z'):
-                try:
-                    return datetime.fromisoformat(value.replace('Z', '+00:00'))
-                except ValueError:
-                    return None
-    return None
-
-
-def _classify_keyword_risk(keyword: str) -> str:
-    key_lower = keyword.lower()
-    if key_lower in HIGH_RISK_KEYWORDS:
-        return 'high'
-    if key_lower in MEDIUM_RISK_KEYWORDS:
-        return 'medium'
-    return 'contextual'
-
-
-def _collect_dashboard_progress_metrics(
-    lookback_days: int = 30,
-    per_user_limit: int = 5,
-    keyword_limit: int = 10,
-) -> Dict[str, Any]:
-    keyword_counter: Counter[str] = Counter()
-    display_lookup: Dict[str, str] = {}
-    risk_counter: Counter[str] = Counter()
-    user_progress: Dict[str, List[Dict[str, Any]]] = {}
-    daily_risk: Dict[str, Counter] = {}  # date_str -> Counter of risk levels
-    if redis_client is None:
-        return {
-            'top_keywords': [],
-            'risk_summary': {'high': 0, 'medium': 0, 'general': 0, 'unknown': 0},
-            'user_progress': {},
-            'risk_trend': [],
-        }
-
-    cutoff = datetime.now() - timedelta(days=max(1, lookback_days))
-    try:
-        for key in redis_client.scan_iter('progress:*'):
-            user_id = key.split(':', 1)[1] if ':' in key else key
-            entries = redis_client.lrange(key, 0, -1)
-            limit_per_user = max(1, per_user_limit)
-            recent_events: List[Dict[str, Any]] = []
-            for raw in entries:
-                try:
-                    entry = json.loads(raw)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-
-                timestamp = _parse_progress_timestamp(entry.get('timestamp'))
-                raw_level = entry.get('risk_level')
-                risk_level = normalize_risk_level(raw_level)
-                keywords = entry.get('keywords') or []
-                risk_counter[risk_level] += 1
-
-                if timestamp and timestamp >= cutoff:
-                    day_key = timestamp.date().isoformat()
-                    if day_key not in daily_risk:
-                        daily_risk[day_key] = Counter()
-                    daily_risk[day_key][risk_level] += 1
-
-                if risk_level in ('high', 'medium') and len(recent_events) < limit_per_user:
-                    recent_events.append({
-                        'timestamp': timestamp.isoformat() if timestamp else None,
-                        'risk_level': risk_level,
-                        'keywords': keywords,
-                    })
-
-                if timestamp and timestamp >= cutoff:
-                    for keyword in keywords:
-                        normalized = keyword.strip()
-                        if not normalized:
-                            continue
-                        lowered = normalized.lower()
-                        keyword_counter[lowered] += 1
-                        display_lookup.setdefault(lowered, normalized)
-
-            if recent_events:
-                user_progress[user_id] = recent_events
-    except Exception as exc:
-        logging.warning('Failed to collect progress metrics: %s', exc)
-
-    top_keywords: List[Dict[str, Any]] = []
-    for lowered, count in keyword_counter.most_common(max(1, keyword_limit)):
-        label = display_lookup.get(lowered, lowered)
-        top_keywords.append({
-            'keyword': label,
-            'count': int(count),
-            'risk_level': _classify_keyword_risk(lowered),
-        })
-
-    risk_summary = {
-        'high': int(risk_counter.get('high', 0)),
-        'medium': int(risk_counter.get('medium', 0)),
-        'general': int(risk_counter.get(GENERAL_RISK_LEVEL, 0)),
-    }
-    unknown_total = sum(
-        count for level, count in risk_counter.items()
-        if level not in risk_summary
-    )
-    risk_summary['unknown'] = int(unknown_total)
-
-    risk_trend: List[Dict[str, Any]] = []
-    for day_key in sorted(daily_risk.keys()):
-        counts = daily_risk[day_key]
-        risk_trend.append({
-            'date': day_key,
-            'high': int(counts.get('high', 0)),
-            'medium': int(counts.get('medium', 0)),
-            'general': int(counts.get(GENERAL_RISK_LEVEL, 0)),
-        })
-
-    return {
-        'top_keywords': top_keywords,
-        'risk_summary': risk_summary,
-        'user_progress': user_progress,
-        'risk_trend': risk_trend,
-    }
-
-
-@limiter.limit('20 per minute')
-@app.route('/api/dashboard/insights', methods=['GET'])
-def get_dashboard_insights():
-    """Summarise conversation and risk insights for care teams."""
-    auth_ok, auth_error = _require_dashboard_auth()
-    if not auth_ok:
-        return auth_error
-    try:
-        user_limit = request.args.get('limit', default=10, type=int) or 10
-        lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
-        keyword_limit = request.args.get('keyword_limit', default=10, type=int) or 10
-
-        user_limit = max(1, min(user_limit, 100))
-        lookback_days = max(1, min(lookback_days, 180))
-        keyword_limit = max(1, min(keyword_limit, 50))
-
-        progress_metrics = _collect_dashboard_progress_metrics(
-            lookback_days=lookback_days,
-            per_user_limit=5,
-            keyword_limit=keyword_limit,
-        )
-
-        overview_raw = db.get_dashboard_overview() or {}
-        overview = {
-            'total_conversations': int(overview_raw.get('total_conversations', 0) or 0),
-            'unique_users': int(overview_raw.get('unique_users', 0) or 0),
-            'important_messages': int(overview_raw.get('important_messages', 0) or 0),
-        }
-
-        try:
-            followup_result = db_manager.execute_query(
-                'SELECT COUNT(*) FROM follow_ups WHERE status != %s',
-                ('completed',),
-            )
-            active_followups = int(followup_result[0][0]) if followup_result else 0
-        except Exception as exc:
-            logging.warning('Could not fetch follow-up metrics: %s', exc)
-            active_followups = 0
-        overview['active_follow_ups'] = active_followups
-
-        user_summaries = db.get_recent_user_summaries(limit=user_limit) or []
-        user_progress_map = progress_metrics.get('user_progress', {})
-        formatted_users: List[Dict[str, Any]] = []
-
-        for summary in user_summaries:
-            formatted = dict(summary)
-            parsed = _parse_progress_timestamp(formatted.get('last_interaction'))
-            if parsed:
-                formatted['last_interaction'] = parsed.isoformat()
-
-            total_messages = int(formatted.get('total_messages') or 0)
-            important_messages = int(formatted.get('important_messages') or 0)
-            total_tokens = int(formatted.get('total_tokens') or 0)
-
-            formatted['total_messages'] = total_messages
-            formatted['important_messages'] = important_messages
-            formatted['total_tokens'] = total_tokens
-            formatted['important_ratio'] = (
-                round(important_messages / total_messages, 3)
-                if total_messages else 0.0
-            )
-            formatted['recent_risk_events'] = user_progress_map.get(
-                formatted.get('user_id'), []
-            )
-
-            formatted_users.append(formatted)
-
-        total_users = len(formatted_users)
-        total_messages_all = sum(user['total_messages'] for user in formatted_users)
-        important_messages_all = sum(user['important_messages'] for user in formatted_users)
-        total_tokens_all = sum(user['total_tokens'] for user in formatted_users)
-        high_focus_users = sum(
-            1 for user in formatted_users
-            if user.get('important_ratio', 0) >= 0.4
-        )
-        growth_watch_users = sum(
-            1 for user in formatted_users
-            if 0.15 <= user.get('important_ratio', 0) < 0.4
-        )
-        monitor_users = max(total_users - high_focus_users - growth_watch_users, 0)
-        returning_users = sum(1 for user in formatted_users if user['total_messages'] >= 10)
-        deep_conversation_users = sum(
-            1 for user in formatted_users
-            if user['total_tokens'] >= 2000
-        )
-        avg_messages_per_user = (
-            round(total_messages_all / total_users, 1)
-            if total_users
-            else 0.0
-        )
-        avg_tokens_per_message = (
-            round(total_tokens_all / total_messages_all, 2)
-            if total_messages_all
-            else 0.0
-        )
-        important_share = (
-            round(important_messages_all / total_messages_all, 3)
-            if total_messages_all
-            else 0.0
-        )
-
-        trend_window = min(max(lookback_days, 7), 30)
-        daily_totals = db.get_recent_daily_message_totals(days=trend_window) or []
-
-        retention_buckets = db.get_retention_buckets() or []
-        conversation_depth = db.get_conversation_depth_trend(days=trend_window) or []
-
-        infographic = {
-            'engagement': {
-                'active_users': total_users,
-                'returning_users': returning_users,
-                'avg_messages_per_user': avg_messages_per_user,
-                'high_focus_users': high_focus_users,
-                'growth_watch_users': growth_watch_users,
-                'monitor_users': monitor_users,
-            },
-            'quality': {
-                'important_message_share': important_share,
-                'avg_tokens_per_message': avg_tokens_per_message,
-                'deep_conversation_users': deep_conversation_users,
-                'active_follow_ups': overview.get('active_follow_ups', 0),
-            },
-            'message_trend': daily_totals,
-        }
-
-        risk_summary = progress_metrics.get('risk_summary', {
-            'high': 0,
-            'medium': 0,
-            'general': 0,
-            'unknown': 0,
-        })
-
-        response_payload = {
-            'generated_at': datetime.now().isoformat(),
-            'parameters': {
-                'user_limit': user_limit,
-                'lookback_days': lookback_days,
-                'keyword_limit': keyword_limit,
-            },
-            'overview': overview,
-            'risk_summary': risk_summary,
-            'risk_trend': progress_metrics.get('risk_trend', []),
-            'top_keywords': progress_metrics.get('top_keywords', []),
-            'infographic': infographic,
-            'retention_buckets': retention_buckets,
-            'conversation_depth': conversation_depth,
-            'users': formatted_users,
-        }
-        return jsonify(response_payload)
-
-    except Exception as exc:
-        logging.error('Error generating dashboard insights: %s', exc, exc_info=True)
-        return jsonify({
-            'error': 'dashboard_generation_failed',
-            'message': 'Dashboard insights are unavailable at the moment.',
-        }), 500
-
-@limiter.limit('30 per minute')
-@app.route('/api/dashboard/users/<user_id>/history', methods=['GET'])
-def get_dashboard_user_history(user_id: str):
-    """Return conversation transcript and risk highlights for a dashboard drill-down."""
-    auth_ok, auth_error = _require_dashboard_auth()
-    if not auth_ok:
-        return auth_error
-    if not user_id:
-        return jsonify({'error': 'missing_user_id'}), 400
-
-    limit = request.args.get('limit', default=50, type=int) or 50
-    limit = max(10, min(limit, 200))
-
-    try:
-        history = db.get_user_conversation_feed(user_id, limit=limit) or []
-        summary = db.get_user_snapshot(user_id) or {
-            'user_id': user_id,
-            'total_messages': 0,
-            'important_messages': 0,
-            'total_tokens': 0,
-            'important_ratio': 0.0,
-            'last_interaction': None,
-            'first_interaction': None,
-        }
-        if summary.get('user_id') is None:
-            summary['user_id'] = user_id
-
-        risk_events: List[Dict[str, Any]] = []
-        if redis_client is not None:
-            raw_events = redis_client.lrange(f"progress:{user_id}", 0, limit - 1)
-            for raw in raw_events:
-                try:
-                    event = json.loads(raw)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-
-                timestamp = _parse_progress_timestamp(event.get('timestamp'))
-                normalized_level = normalize_risk_level(event.get('risk_level'))
-                risk_events.append({
-                    'timestamp': timestamp.isoformat() if timestamp else event.get('timestamp'),
-                    'risk_level': normalized_level,
-                    'keywords': event.get('keywords') or [],
-                })
-
-        response_payload = {
-            'generated_at': datetime.now().isoformat(),
-            'user_id': user_id,
-            'summary': summary,
-            'history': history,
-            'risk_events': risk_events,
-            'limit': limit,
-        }
-        return jsonify(response_payload)
-    except Exception as exc:
-        logging.error('Error retrieving dashboard user history for %s: %s', user_id, exc, exc_info=True)
-        return jsonify({
-            'error': 'user_history_unavailable',
-            'message': 'ไม่สามารถดึงประวัติการสนทนาได้ในขณะนี้',
-        }), 500
 
 
 # Health check endpoint
@@ -648,312 +350,54 @@ def health_check():
             'timestamp': datetime.now().isoformat()
         }), 500
 
-def chunk_conversation_history(history, chunk_size=10):
-    """
-    แบ่งประวัติการสนทนาเป็นส่วนๆ (chunks) เพื่อการสรุปที่มีประสิทธิภาพ
+from .services.context_manager import (
+    chunk_conversation_history,
+    summarize_conversation_chunk as _ctx_summarize_chunk,
+    summarize_conversation_history as _ctx_summarize_history,
+    summarize_by_topic as _ctx_summarize_by_topic,
+    filter_messages_for_api,
+    optimize_context,
+)
 
-    Args:
-        history (list): ประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-        chunk_size (int): ขนาดของแต่ละส่วน
-
-    Returns:
-        list: รายการของส่วนประวัติการสนทนา
-    """
-    return [history[i:i + chunk_size] for i in range(0, len(history), chunk_size)]
 
 def summarize_conversation_chunk(chunk):
-    """
-    สรุปส่วนของประวัติการสนทนา
+    """สรุปส่วนของประวัติการสนทนา — delegates to services.context_manager"""
+    return _ctx_summarize_chunk(chunk, config)
 
-    Args:
-        chunk (list): ส่วนของประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-
-    Returns:
-        str: ข้อความสรุป
-    """
-    if not chunk:
-        return ""
-
-    try:
-        # สร้างข้อความสนทนา
-        conversation_text = ""
-        for _, msg, resp in chunk:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
-
-        summary_prompt = f"""
-โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
-
-{conversation_text}
-
-กรุณาสรุปโดยครอบคลุม:
-1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
-2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
-3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
-4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
-5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
-
-**ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
-"""
-
-        text = grok_client.send_chat(
-            messages=[
-                SYSTEM_MESSAGE_SUMMARY,
-                {"role": "user", "content": summary_prompt}
-            ],
-            model=config.XAI_MODEL,
-            **SUMMARY_GENERATION_CONFIG,
-        )
-
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_chunk: {str(e)}")
-        return ""
 
 def process_and_optimize_history(user_id, max_tokens=450000):
-    """
-    ประมวลผลและปรับปรุงประวัติการสนทนาให้เหมาะสมที่สุด
-    รวมการสรุปเป็นชั้นๆ และการจัดลำดับความสำคัญ
+    """ประมวลผลและปรับปรุงประวัติการสนทนา — delegates to services.context_manager"""
+    return optimize_context(user_id, config, db, max_tokens=max_tokens)
 
-    Args:
-        user_id (str): LINE User ID
-        max_tokens (int): จำนวนโทเค็นสูงสุดที่ต้องการใช้ (90% ของ TOKEN_THRESHOLD)
-
-    Returns:
-        list: ประวัติการสนทนาที่ปรับปรุงแล้ว
-    """
-    try:
-        # 1. ตรวจสอบโทเค็นในเซสชันปัจจุบัน
-        session_tokens = get_session_token_count(user_id)
-        if session_tokens < max_tokens:
-            # ถ้ายังอยู่ในเกณฑ์ ส่งคืนประวัติทั้งหมด
-            return get_chat_session(user_id)
-
-        # 2. ดึงประวัติจากฐานข้อมูลและเซสชัน
-        db_history = db.get_user_history(user_id, max_tokens=max_tokens)
-        session_history = get_chat_session(user_id)
-
-        # 3. ระบุข้อความสำคัญ
-        important_messages = []
-
-        # แยกข้อความสำคัญจาก session history
-        for i in range(0, len(session_history), 2):
-            if i+1 < len(session_history):
-                user_msg = session_history[i].get("content", "")
-                bot_resp = session_history[i+1].get("content", "")
-
-                if is_important_message(user_msg, bot_resp):
-                    important_messages.append({"role": "user", "content": user_msg})
-                    important_messages.append({"role": "assistant", "content": bot_resp})
-
-        # 4. เก็บข้อความล่าสุด
-        recent_count = min(20, len(session_history) // 2)  # จำนวนการโต้ตอบล่าสุด (ไม่เกิน 20)
-        recent_messages = session_history[-recent_count*2:]  # *2 เพราะแต่ละการโต้ตอบมี 2 ข้อความ
-
-        # 5. สรุปข้อความที่เหลือจาก db_history
-        # แบ่งเป็นส่วนๆ เพื่อประสิทธิภาพในการสรุป
-        chunks = chunk_conversation_history(db_history, chunk_size=10)
-        summaries = []
-
-        for chunk in chunks:
-            summary = summarize_conversation_chunk(chunk)
-            if summary:
-                summaries.append(summary)
-
-        # 6. รวมประวัติทั้งหมด
-        optimized_history = []
-
-        # เพิ่มสรุปทั้งหมด
-        if summaries:
-            combined_summary = "\n\n".join(summaries)
-            # ใช้ role พิเศษสำหรับการสรุปที่ไม่แสดงให้ผู้ใช้เห็น
-            optimized_history.append({"role": "system_summary", "content": f"สรุปการสนทนาก่อนหน้า: {combined_summary}"})
-
-        # เพิ่มข้อความสำคัญ
-        optimized_history.extend(important_messages)
-
-        # เพิ่มข้อความล่าสุด
-        for msg in recent_messages:
-            # ตรวจสอบว่าไม่ซ้ำกับข้อความสำคัญ
-            if msg not in important_messages:
-                optimized_history.append(msg)
-
-        # 7. บันทึกประวัติที่ปรับปรุงแล้ว
-        save_chat_session(user_id, optimized_history)
-
-        return optimized_history
-
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดในการปรับปรุงประวัติ: {str(e)}")
-        return get_chat_session(user_id)  # ส่งคืนประวัติปกติในกรณีที่มีข้อผิดพลาด
-
-def filter_messages_for_api(messages):
-    """
-    กรองข้อความที่มี role เป็น 'system_summary' ออกจากการส่งไปยัง API
-    แต่ยังคงไว้ในระบบเพื่อให้ AI เข้าใจบริบท
-    
-    Args:
-        messages (list): รายการข้อความ
-        
-    Returns:
-        list: ข้อความที่กรองแล้ว
-    """
-    filtered_messages = []
-    summary_content = ""
-    
-    for message in messages:
-        if message.get('role') == 'system_summary':
-            # เก็บเนื้อหาสรุปแต่ไม่ส่งไปยัง API
-            summary_content += message.get('content', '') + "\n\n"
-        else:
-            filtered_messages.append(message)
-    
-    # ถ้ามีการสรุป ให้รวมเข้ากับ system message เพื่อให้ AI เข้าใจบริบท
-    if summary_content.strip():
-        # ค้นหา system message ที่มีอยู่แล้ว
-        system_msg_found = False
-        for i, msg in enumerate(filtered_messages):
-            if msg.get('role') == 'system':
-                # เพิ่มการสรุปเข้าใน system message ที่มีอยู่
-                filtered_messages[i] = {
-                    'role': 'system',
-                    'content': msg.get('content', '') + "\n\nข้อมูลสำคัญเพิ่มเติม (สำหรับ AI เท่านั้น):\n" + summary_content.strip()
-                }
-                system_msg_found = True
-                break
-        
-        # ถ้าไม่มี system message ให้เพิ่มใหม่
-        if not system_msg_found:
-            filtered_messages.insert(0, {
-                'role': 'system',
-                'content': "ข้อมูลสำคัญเพิ่มเติม (สำหรับ AI เท่านั้น):\n" + summary_content.strip()
-            })
-    
-    return filtered_messages
 
 def summarize_conversation_history(history):
-    """
-    สรุปประวัติการสนทนาให้กระชับ โดยมีการจัดการขนาด
+    """สรุปประวัติการสนทนาให้กระชับ — delegates to services.context_manager"""
+    return _ctx_summarize_history(history, config)
 
-    Args:
-        history (list): รายการประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-
-    Returns:
-        str: ข้อความสรุป
-    """
-    if not history:
-        return ""
-
-    try:
-        # แบ่งประวัติเป็นส่วนๆ หากมีขนาดใหญ่
-        if len(history) > 20:
-            # แบ่งเป็นชิ้นและสรุปแต่ละชิ้น
-            chunks = chunk_conversation_history(history, chunk_size=10)
-            summaries = []
-
-            for chunk in chunks:
-                chunk_summary = summarize_conversation_chunk(chunk)
-                if chunk_summary:
-                    summaries.append(chunk_summary)
-
-            # รวมสรุปทั้งหมด
-            if summaries:
-                combined_summary = "\n".join([f"• {summary}" for summary in summaries])
-                return combined_summary
-
-        # หากมีขนาดเล็ก ใช้วิธีสรุปแบบปกติ
-        conversation_text = ""
-        for _, msg, resp in history:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
-
-        summary_prompt = f"""
-โปรดสรุปประวัติการสนทนาต่อไปนี้โดยเน้นประเด็นสำคัญตามหลัก Motivational Interviewing:
-
-{conversation_text}
-
-กรุณาสรุปโดยครอบคลุม:
-1. **ปัญหาหลัก**: สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
-2. **ระยะของการเปลี่ยนแปลง**: Precontemplation / Contemplation / Preparation / Action / Maintenance
-3. **Change Talk**: ความปรารถนา ความสามารถ เหตุผล ความจำเป็น ความมุ่งมั่น การลงมือ (DARN-CAT)
-4. **อุปสรรคหลัก**: สิ่งที่ขัดขวางการเปลี่ยนแปลง
-5. **ความคืบหน้า**: ความสำเร็จหรือการกลับไปเสพซ้ำ (ถ้ามี)
-
-ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
-"""
-
-        text = grok_client.send_chat(
-            messages=[
-                SYSTEM_MESSAGE_SUMMARY,
-                {"role": "user", "content": summary_prompt}
-            ],
-            model=config.XAI_MODEL,
-            **SUMMARY_GENERATION_CONFIG,
-        )
-
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดใน summarize_conversation_history: {str(e)}")
-        return ""
 
 def summarize_by_topic(history):
-    """
-    สรุปประวัติการสนทนาแบ่งตามหัวข้อ
-    เหมาะสำหรับการสนทนาที่มีหลายหัวข้อคละกัน
-
-    Args:
-        history (list): รายการประวัติการสนทนา [(id, user_msg, bot_resp), ...]
-
-    Returns:
-        str: ข้อความสรุปแบ่งตามหัวข้อ
-    """
-    if not history:
-        return ""
-
-    try:
-        # สร้างข้อความเพื่อให้ AI แบ่งหัวข้อและสรุป
-        topic_prompt = """
-นี่คือประวัติการสนทนาระหว่างผู้ใช้และบอทเกี่ยวกับการเลิกสารเสพติด:
-
-{conversation}
-
-โปรดวิเคราะห์และแบ่งแยกหัวข้อสำคัญต่างๆ ในการสนทนานี้ พร้อมทั้งสรุปแต่ละหัวข้อ ตามรูปแบบนี้:
-1. [ชื่อหัวข้อ 1]: [สรุป]
-2. [ชื่อหัวข้อ 2]: [สรุป]
-...
-
-แต่ละหัวข้อควรครอบคลุมประเด็นสำคัญที่พูดถึงโดยมีใจความชัดเจน กระชับ และเก็บรายละเอียดสำคัญไว้
-"""
-
-        # สร้างเนื้อหาการสนทนาสำหรับใส่ใน prompt
-        conversation_text = ""
-        for _, msg, resp in history:
-            conversation_text += f"ผู้ใช้: {msg}\nบอท: {resp}\n\n"
-
-        # นำเนื้อหาการสนทนาใส่ใน prompt
-        topic_prompt = topic_prompt.format(conversation=conversation_text)
-
-        # ส่งไปให้ AI ประมวลผล
-        text = grok_client.send_chat(
-            messages=[
-                SYSTEM_MESSAGE_SUMMARY,
-                {"role": "user", "content": topic_prompt}
-            ],
-            model=config.XAI_MODEL,
-            temperature=0.2,
-            max_tokens=1500,
-        )
-
-        return text
-    except Exception as e:
-        logging.error(f"เกิดข้อผิดพลาดใน summarize_by_topic: {str(e)}")
-        return ""
+    """สรุปประวัติการสนทนาแบ่งตามหัวข้อ — delegates to services.context_manager"""
+    return _ctx_summarize_by_topic(history, config)
 
 
 def is_user_registered(user_id):
-    """ตรวจสอบว่าผู้ใช้ลงทะเบียนแล้วหรือไม่"""
+    """ตรวจสอบว่าผู้ใช้ลงทะเบียนแล้วหรือไม่ (cached in Redis for 5 min)"""
+    cache_key = f"registered:{user_id}"
+    try:
+        cached = redis_client.get(cache_key)
+        if cached is not None:
+            return cached == '1'
+    except Exception:
+        pass
     try:
         query = 'SELECT EXISTS(SELECT 1 FROM registration_codes WHERE user_id = %s AND status = %s)'
         result = db_manager.execute_query(query, (user_id, 'verified'))
-        return bool(result[0][0]) if result else False
+        registered = bool(result[0][0]) if result else False
+        try:
+            redis_client.setex(cache_key, 300, '1' if registered else '0')
+        except Exception:
+            pass
+        return registered
     except Exception as e:
         logging.error(f"Error checking user registration: {str(e)}")
         return False
@@ -1001,6 +445,12 @@ def register_user_with_code(user_id, code):
         # อัพเดทรหัสให้เชื่อมกับผู้ใช้และสถานะเป็น verified
         update_query = 'UPDATE registration_codes SET user_id = %s, status = %s, verified_at = %s WHERE code = %s'
         db_manager.execute_and_commit(update_query, (user_id, 'verified', datetime.now(), code))
+
+        # Invalidate registration cache so subsequent checks see the new status immediately
+        try:
+            redis_client.setex(f"registered:{user_id}", 300, '1')
+        except Exception:
+            pass
 
         # บันทึกบริบทเริ่มต้นของผู้ใช้
         if form_data and ai_summary:
@@ -1359,9 +809,9 @@ def send_final_response(user_id, bot_response, reply_token=None):
             try:
                 if reply_batch:
                     payload = reply_batch if len(reply_batch) > 1 else reply_batch[0]
-                    line_bot_api.reply_message(reply_token, payload)
+                    _line_circuit_breaker.call(line_bot_api.reply_message, reply_token, payload)
                     to_push = messages[5:]
-            except LineBotApiError as exc:
+            except (LineBotApiError, ChatbotError) as exc:
                 logging.warning(f"Reply message failed for user {user_id}: {exc}")
                 to_push = messages
 
@@ -1370,7 +820,7 @@ def send_final_response(user_id, bot_response, reply_token=None):
             if not batch:
                 continue
             payload = batch if len(batch) > 1 else batch[0]
-            line_bot_api.push_message(user_id, payload)
+            _line_circuit_breaker.call(line_bot_api.push_message, user_id, payload)
             if index + 5 < len(to_push):
                 time.sleep(0.5)
 
@@ -1738,7 +1188,7 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         while retry_count < max_retries and bot_response is None:
             try:
-                response_text = generate_ai_response_with_timeout(messages, timeout=30)
+                response_text = generate_ai_response_with_timeout(messages, timeout=30, user_id=user_id)
                 
                 if not response_text:
                     raise ValueError("Empty AI response")
@@ -1756,10 +1206,12 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
                     logging.warning(f"AI API timeout (attempt {retry_count}/{max_retries})")
                     time.sleep(2 ** retry_count)  # Exponential backoff
                 else:
-                    raise create_legacy_chatbot_error(
-                        ErrorType.AI_API_ERROR,
-                        "AI API timeout after all retries",
-                        timeout_error
+                    raise ChatbotError(
+                        message="AI API timeout after all retries",
+                        category=ErrorCategory.EXTERNAL_API,
+                        severity=ErrorSeverity.HIGH,
+                        user_message="ขออภัยครับ ระบบ AI กำลังมีปัญหา กรุณาลองใหม่อีกครั้ง",
+                        original_error=timeout_error,
                     )
                     
             except RateLimitError as e:
@@ -1778,10 +1230,12 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
                 logging.error(f"AI API error (attempt {retry_count + 1}): {str(e)}")
                 retry_count += 1
                 if retry_count >= max_retries:
-                    raise create_legacy_chatbot_error(
-                        ErrorType.AI_API_ERROR,
-                        f"AI API error after {max_retries} attempts",
-                        e
+                    raise ChatbotError(
+                        message=f"AI API error after {max_retries} attempts",
+                        category=ErrorCategory.EXTERNAL_API,
+                        severity=ErrorSeverity.HIGH,
+                        user_message="ขออภัยครับ ระบบ AI กำลังมีปัญหา กรุณาลองใหม่อีกครั้ง",
+                        original_error=e,
                     )
         
         # 5. ถ้ายังไม่มี response ให้ใช้ fallback
@@ -1799,9 +1253,11 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         try:
             success = send_final_response(user_id, bot_response, reply_token=reply_token)
             if not success:
-                raise create_legacy_chatbot_error(
-                    ErrorType.MESSAGE_SEND_ERROR,
-                    "Failed to send response to user"
+                raise ChatbotError(
+                    message="Failed to send response to user",
+                    category=ErrorCategory.NETWORK,
+                    severity=ErrorSeverity.HIGH,
+                    user_message="ไม่สามารถส่งข้อความได้ กรุณาตรวจสอบการเชื่อมต่อ",
                 )
         except Exception as e:
             logging.critical(f"ไม่สามารถส่งข้อความให้ผู้ใช้ {user_id}: {str(e)}")
@@ -1903,8 +1359,24 @@ def prepare_conversation_messages(user_id: str, user_context: Optional[str]) -> 
         history_for_summary: List[Tuple] = []
 
         history_token_limit = 100000 if not messages else 50000
+        # Use short-TTL cache for DB history to avoid redundant queries within the same request cycle
+        _history_cache_key = f"history_cache:{user_id}"
         try:
-            history_for_summary = db.get_user_history(user_id, max_tokens=history_token_limit) or []
+            _cached_history = redis_client.get(_history_cache_key)
+            if _cached_history:
+                history_for_summary = json.loads(_cached_history)
+                # Convert lists back to tuples for compatibility
+                history_for_summary = [tuple(item) for item in history_for_summary]
+            else:
+                history_for_summary = db.get_user_history(user_id, max_tokens=history_token_limit) or []
+                if history_for_summary:
+                    try:
+                        redis_client.setex(
+                            _history_cache_key, 60,
+                            json.dumps([list(item) for item in history_for_summary])
+                        )
+                    except Exception:
+                        pass
         except Exception as e:
             logging.warning(f"ไม่สามารถโหลดประวัติจากฐานข้อมูล: {str(e)}")
             history_for_summary = []
@@ -1959,7 +1431,7 @@ def create_minimal_session(user_context: Optional[str]) -> List[Dict[str, str]]:
     return messages
 
 
-def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30) -> str:
+def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30, user_id: str = "system") -> str:
     """เรียก xAI Grok API พร้อม timeout และคืนข้อความตอบกลับ"""
     filtered_messages = filter_messages_for_api(messages)
 
@@ -1984,7 +1456,8 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
     def _call() -> str:
-        return grok_client.send_chat(
+        return _xai_circuit_breaker.call(
+            grok_client.send_chat,
             messages=api_messages,
             model=config.XAI_MODEL,
             **dynamic_config,
@@ -1992,7 +1465,25 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
 
     future = _AI_EXECUTOR.submit(_call)
     try:
-        return future.result(timeout=effective_timeout)
+        call_start = time.time()
+        result = future.result(timeout=effective_timeout)
+        response_time_ms = (time.time() - call_start) * 1000
+
+        # ติดตามการใช้โทเค็น
+        try:
+            input_tokens = token_counter.count_message_tokens(api_messages) if token_counter else 0
+            output_tokens = token_counter.count_tokens(result) if token_counter else 0
+            track_grok_call(
+                user_id=user_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=config.XAI_MODEL,
+                response_time_ms=response_time_ms,
+            )
+        except Exception as track_err:
+            logging.debug(f"Token tracking failed (non-critical): {track_err}")
+
+        return result
     except concurrent.futures.TimeoutError:
         raise requests.exceptions.Timeout(f"AI API timeout after {effective_timeout} seconds")
 
@@ -2134,40 +1625,10 @@ def send_system_notification(user_id: str, used_fallback: bool, had_error: bool)
     threading.Thread(target=send_delayed, daemon=True).start()
 
 
-# Helper function to create legacy-compatible ChatbotError
-def create_legacy_chatbot_error(error_type: ErrorType, message: str, original_error: Optional[Exception] = None):
-    """Create ChatbotError compatible with legacy system"""
-    # Create a simple object that mimics the old ChatbotError for backward compatibility
-    class LegacyChatbotError(Exception):
-        def __init__(self, error_type: ErrorType, message: str, original_error: Optional[Exception] = None):
-            self.error_type = error_type
-            self.message = message
-            self.original_error = original_error
-            super().__init__(self.message)
-    
-    return LegacyChatbotError(error_type, message, original_error)
-
-
 def handle_chatbot_error(error: ChatbotError, user_id: str, user_message: str, reply_token: Optional[str] = None):
-    """จัดการข้อผิดพลาดที่คาดการณ์ได้ - compatible with both legacy and new error systems"""
-
-    if hasattr(error, 'error_type'):
-        logging.error(f"ChatbotError [Legacy-{error.error_type.value}]: {error.message}")
-
-        error_messages = {
-            ErrorType.AI_API_ERROR: "ขออภัยครับ ระบบ AI กำลังมีปัญหา กรุณาลองใหม่อีกครั้ง",
-            ErrorType.TOKEN_MANAGEMENT_ERROR: "กำลังจัดระเบียบข้อมูล กรุณารอสักครู่",
-            ErrorType.DATABASE_ERROR: "มีปัญหาในการบันทึกข้อมูล แต่เรายังคุยกันต่อได้ครับ",
-            ErrorType.MESSAGE_SEND_ERROR: "ไม่สามารถส่งข้อความได้ กรุณาตรวจสอบการเชื่อมต่อ",
-        }
-
-        message = error_messages.get(
-            error.error_type,
-            "ขออภัยครับ เกิดข้อผิดพลาด กรุณาลองใหม่",
-        )
-    else:
-        logging.error(f"ChatbotError [{error.category.value}-{error.severity.value}]: {error.message}")
-        message = error.user_message or "ขออภัยครับ เกิดข้อผิดพลาด กรุณาลองใหม่"
+    """จัดการข้อผิดพลาดที่คาดการณ์ได้"""
+    logging.error(f"ChatbotError [{error.category.value}-{error.severity.value}]: {error.message}")
+    message = error.user_message or "ขออภัยครับ เกิดข้อผิดพลาด กรุณาลองใหม่"
 
     try:
         send_final_response(user_id, message, reply_token=reply_token)
@@ -2213,10 +1674,14 @@ def queue_for_retry(operation_type: str, data: dict):
         redis_client.expire(retry_key, 86400)
     except Exception as e:
         logging.warning(f"Failed to queue for retry ({operation_type}): {e}")
-        # ถ้า Redis ไม่ทำงาน บันทึกลงไฟล์
+        # ถ้า Redis ไม่ทำงาน บันทึกลงไฟล์ (จำกัดขนาด 10MB)
         try:
-            with open(f"retry_{operation_type}_{datetime.now().strftime('%Y%m%d')}.log", 'a') as f:
-                f.write(json.dumps(data) + '\n')
+            retry_log_path = os.path.join('logs', f"retry_{operation_type}_{datetime.now().strftime('%Y%m%d')}.log")
+            if os.path.exists(retry_log_path) and os.path.getsize(retry_log_path) > 10 * 1024 * 1024:
+                logging.warning(f"Retry log file exceeds 10MB, skipping write: {retry_log_path}")
+            else:
+                with open(retry_log_path, 'a') as f:
+                    f.write(json.dumps(data) + '\n')
         except Exception:
             logging.error(f"Failed to write retry log for {operation_type}")
 
@@ -2250,11 +1715,8 @@ def record_processing_metrics(user_id: str, processing_time: float, used_fallbac
 
 def notify_admin_critical_error(user_id: str, user_message: str, error: str):
     """แจ้งเตือน admin เมื่อมี critical error"""
-    # ใช้วิธีที่เหมาะสมกับระบบ เช่น
-    # - ส่งอีเมล
-    # - ส่ง LINE notify
-    # - บันทึกลง monitoring system
-    pass
+    from .services.admin_alerting import alert_critical_error
+    alert_critical_error(user_id, user_message, error)
 
 
 def save_error_for_analysis(error_id: str, user_id: str, user_message: str, error: Exception):
@@ -2274,7 +1736,7 @@ def save_error_for_analysis(error_id: str, user_id: str, user_message: str, erro
         redis_client.hset(f"errors:{datetime.now().strftime('%Y%m%d')}", error_id, json.dumps(error_data))
         redis_client.expire(f"errors:{datetime.now().strftime('%Y%m%d')}", 604800)  # 7 วัน
         
-    except:
+    except Exception:
         # ถ้าบันทึกไม่ได้ ก็ไม่ต้องทำอะไร
         pass
 
@@ -2430,6 +1892,8 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             "📋 /context - ดูบริบทของคุณจากแบบประเมินที่กรอกไว้\n"
             "🔔 /followup - ตรวจสอบกำหนดการติดตามของคุณ\n"
             "🚨 /emergency - ดูข้อมูลติดต่อฉุกเฉินและสายด่วน\n"
+            "🔒 /privacy - ดูนโยบายความเป็นส่วนตัว\n"
+            "🗑️ /deletedata - ลบข้อมูลทั้งหมดของคุณ\n"
             "❓ /help - แสดงเมนูช่วยเหลือนี้\n\n"
             "💡 ตัวอย่างคำถามที่สามารถถามฉันได้:\n"
             "- \"ช่วยประเมินการใช้สารเสพติดของฉันหน่อย\"\n"
@@ -2522,6 +1986,15 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             )
         send_final_response(user_id, response_text, reply_token=reply_token)
         return True
+
+    elif normalized == '/privacy':
+        from .services.data_management import get_privacy_policy_message
+        response_text = get_privacy_policy_message()
+
+    elif normalized == '/deletedata':
+        from .services.data_management import delete_all_user_data, format_deletion_result
+        result = delete_all_user_data(user_id)
+        response_text = format_deletion_result(result)
 
     else:
         send_final_response(
@@ -2705,17 +2178,34 @@ def check_line_api_health():
     except Exception:
         return False
 
+_grok_health_cache: Dict[str, Any] = {'healthy': None, 'checked_at': 0.0}
+_GROK_HEALTH_CACHE_TTL = 300  # 5 นาที
+
 def check_grok_api_health():
-    """ตรวจสอบการเชื่อมต่อ xAI Grok API"""
+    """ตรวจสอบการเชื่อมต่อ xAI Grok API (cached เพื่อลดค่าใช้จ่ายโทเค็น)"""
+    now = time.time()
+
+    # ถ้า circuit breaker เปิดอยู่ → ไม่ต้องตรวจสอบจริง
+    if _xai_circuit_breaker.state.value == 'open':
+        return False
+
+    # ใช้ค่า cache ถ้ายังไม่หมดอายุ
+    if _grok_health_cache['healthy'] is not None and (now - _grok_health_cache['checked_at']) < _GROK_HEALTH_CACHE_TTL:
+        return _grok_health_cache['healthy']
+
     try:
         _ = grok_client.send_chat(
             messages=[{"role": "user", "content": "ping"}],
             model=config.XAI_MODEL,
             max_tokens=1,
         )
+        _grok_health_cache['healthy'] = True
+        _grok_health_cache['checked_at'] = now
         return True
     except Exception as e:
         logging.debug(f"xAI Grok API health check failed: {str(e)}")
+        _grok_health_cache['healthy'] = False
+        _grok_health_cache['checked_at'] = now
         return False
 
 def get_uptime():
@@ -2757,50 +2247,14 @@ def handle_message(event):
     user_id = event.source.user_id
     user_message = event.message.text
 
-    # ตรวจสอบว่าเป็นการยืนยันรหัสด้วย /verify หรือไม่
-    if user_message.lower().startswith("/verify"):
-        # ตรวจสอบว่าผู้ใช้ลงทะเบียนแล้วหรือไม่
-        if is_user_registered(user_id):
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="✅ คุณได้ลงทะเบียนและยืนยันตัวตนเรียบร้อยแล้ว\n"
-                                    "ไม่จำเป็นต้องยืนยันอีกครั้ง คุณสามารถใช้บริการของน้องใจดีได้ตามปกติ")
-            )
-            return
-
-        # ดำเนินการต่อสำหรับผู้ที่ยังไม่ได้ลงทะเบียน
-        try:
-            # แยกรหัสยืนยันออกจากข้อความ
-            parts = user_message.split()
-            if len(parts) != 2:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="รูปแบบไม่ถูกต้อง กรุณาพิมพ์ \"/verify\" ตามด้วยรหัส 6 หลัก เช่น \"/verify 123456\"")
-                )
-                return
-
-            confirmation_code = parts[1].strip()
-            _, message = register_user_with_code(user_id, confirmation_code)
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=message)
-            )
-            return
-        except (IndexError, ValueError):
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="รูปแบบไม่ถูกต้อง กรุณาพิมพ์ \"/verify\" ตามด้วยรหัส 6 หลัก เช่น \"/verify 123456\"")
-            )
-            return
-
     # คำสั่งขอลิงก์ลงทะเบียนใหม่
     if user_message.lower() == "/register":
         send_registration_message(user_id)
         return
 
     # ตรวจสอบการลงทะเบียนก่อนประมวลผลข้อความปกติ
-    if not is_user_registered(user_id):
+    # อนุญาตให้ /verify ผ่านได้แม้ยังไม่ลงทะเบียน เพื่อให้ไปจัดการที่ handle_command_with_processing()
+    if not is_user_registered(user_id) and not user_message.lower().startswith("/verify"):
         # ตรวจสอบว่าเคยส่งข้อความลงทะเบียนแล้วหรือไม่
         registration_sent = redis_client.exists(f"registration_sent:{user_id}")
 
@@ -2872,8 +2326,10 @@ def init_scheduler():
         return
     _scheduler_initialized = True
     scheduler.add_job(check_and_send_follow_ups, 'interval', minutes=30)
+    from .services.proactive_checkin import run_proactive_checkins
+    scheduler.add_job(run_proactive_checkins, 'interval', hours=6, id='proactive_checkin')
     scheduler.start()
-    logging.info("ตัวกำหนดการเริ่มต้นแล้ว ตรวจสอบการติดตามทุก 30 นาที")
+    logging.info("ตัวกำหนดการเริ่มต้นแล้ว: ติดตามทุก 30 นาที, เช็คอินเชิงรุกทุก 6 ชม.")
 
     # การจัดการการปิดอย่างถูกต้อง
     atexit.register(lambda: shutdown_scheduler(reason='atexit'))

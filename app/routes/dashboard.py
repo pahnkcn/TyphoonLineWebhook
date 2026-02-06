@@ -1,0 +1,522 @@
+"""Dashboard routes — extracted from app_main.py as a Flask Blueprint."""
+import csv
+import hashlib
+import io
+import os
+import json
+import hmac
+import logging
+from datetime import datetime, timedelta
+from collections import Counter
+from typing import Any, Dict, List, Optional
+
+from flask import Blueprint, request, jsonify, render_template, Response
+from flask_cors import CORS
+
+from ..risk_assessment import normalize_risk_level, RISK_KEYWORDS
+
+dashboard_bp = Blueprint('dashboard', __name__)
+
+# CORS for dashboard API endpoints only (not the whole app)
+CORS(dashboard_bp, resources={r"/api/dashboard/*": {"origins": "*", "methods": ["GET", "OPTIONS"]}})
+
+
+@dashboard_bp.after_request
+def add_security_headers(response):
+    """Add security headers to all dashboard responses."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+# Module-level references set by init_dashboard()
+_db = None          # ChatHistoryDB
+_db_manager = None  # DatabaseManager
+_redis_client = None
+_DASHBOARD_API_KEY: str = ''
+_HIGH_RISK_KEYWORDS = set()
+_MEDIUM_RISK_KEYWORDS = set()
+_GENERAL_RISK_LEVEL = 'general'
+
+
+def init_dashboard(db, db_manager, redis_client, general_risk_level='general'):
+    """Wire runtime dependencies into the dashboard module."""
+    global _db, _db_manager, _redis_client, _DASHBOARD_API_KEY
+    global _HIGH_RISK_KEYWORDS, _MEDIUM_RISK_KEYWORDS, _GENERAL_RISK_LEVEL
+    _db = db
+    _db_manager = db_manager
+    _redis_client = redis_client
+    _DASHBOARD_API_KEY = os.getenv('DASHBOARD_API_KEY', '')
+    _HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
+    _MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
+    _GENERAL_RISK_LEVEL = general_risk_level
+
+
+def _require_dashboard_auth():
+    """Validate dashboard API key from Authorization header or query param."""
+    if not _DASHBOARD_API_KEY:
+        return True, None
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:]
+        if hmac.compare_digest(token, _DASHBOARD_API_KEY):
+            return True, None
+    token = request.args.get('api_key', '')
+    if token and hmac.compare_digest(token, _DASHBOARD_API_KEY):
+        logging.warning("Dashboard API key passed via query parameter — use Authorization header instead")
+        return True, None
+    return False, (jsonify({"error": "Unauthorized"}), 401)
+
+
+def _parse_progress_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            if value.endswith('Z'):
+                try:
+                    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+                except ValueError:
+                    return None
+    return None
+
+
+def _classify_keyword_risk(keyword: str) -> str:
+    key_lower = keyword.lower()
+    if key_lower in _HIGH_RISK_KEYWORDS:
+        return 'high'
+    if key_lower in _MEDIUM_RISK_KEYWORDS:
+        return 'medium'
+    return 'contextual'
+
+
+def _collect_dashboard_progress_metrics(
+    lookback_days: int = 30,
+    per_user_limit: int = 5,
+    keyword_limit: int = 10,
+) -> Dict[str, Any]:
+    keyword_counter: Counter = Counter()
+    display_lookup: Dict[str, str] = {}
+    risk_counter: Counter = Counter()
+    user_progress: Dict[str, List[Dict[str, Any]]] = {}
+    daily_risk: Dict[str, Counter] = {}
+    if _redis_client is None:
+        return {
+            'top_keywords': [],
+            'risk_summary': {'high': 0, 'medium': 0, 'general': 0, 'unknown': 0},
+            'user_progress': {},
+            'risk_trend': [],
+        }
+
+    cutoff = datetime.now() - timedelta(days=max(1, lookback_days))
+    try:
+        for key in _redis_client.scan_iter('progress:*'):
+            user_id = key.split(':', 1)[1] if ':' in key else key
+            entries = _redis_client.lrange(key, 0, -1)
+            limit_per_user = max(1, per_user_limit)
+            recent_events: List[Dict[str, Any]] = []
+            for raw in entries:
+                try:
+                    entry = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+
+                timestamp = _parse_progress_timestamp(entry.get('timestamp'))
+                raw_level = entry.get('risk_level')
+                risk_level = normalize_risk_level(raw_level)
+                keywords = entry.get('keywords') or []
+                risk_counter[risk_level] += 1
+
+                if timestamp and timestamp >= cutoff:
+                    day_key = timestamp.date().isoformat()
+                    if day_key not in daily_risk:
+                        daily_risk[day_key] = Counter()
+                    daily_risk[day_key][risk_level] += 1
+
+                if risk_level in ('high', 'medium') and len(recent_events) < limit_per_user:
+                    recent_events.append({
+                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'risk_level': risk_level,
+                        'keywords': keywords,
+                    })
+
+                if timestamp and timestamp >= cutoff:
+                    for keyword in keywords:
+                        normalized = keyword.strip()
+                        if not normalized:
+                            continue
+                        lowered = normalized.lower()
+                        keyword_counter[lowered] += 1
+                        display_lookup.setdefault(lowered, normalized)
+
+            if recent_events:
+                user_progress[user_id] = recent_events
+    except Exception as exc:
+        logging.warning('Failed to collect progress metrics: %s', exc)
+
+    top_keywords: List[Dict[str, Any]] = []
+    for lowered, count in keyword_counter.most_common(max(1, keyword_limit)):
+        label = display_lookup.get(lowered, lowered)
+        top_keywords.append({
+            'keyword': label,
+            'count': int(count),
+            'risk_level': _classify_keyword_risk(lowered),
+        })
+
+    risk_summary = {
+        'high': int(risk_counter.get('high', 0)),
+        'medium': int(risk_counter.get('medium', 0)),
+        'general': int(risk_counter.get(_GENERAL_RISK_LEVEL, 0)),
+    }
+    unknown_total = sum(
+        count for level, count in risk_counter.items()
+        if level not in risk_summary
+    )
+    risk_summary['unknown'] = int(unknown_total)
+
+    risk_trend: List[Dict[str, Any]] = []
+    for day_key in sorted(daily_risk.keys()):
+        counts = daily_risk[day_key]
+        risk_trend.append({
+            'date': day_key,
+            'high': int(counts.get('high', 0)),
+            'medium': int(counts.get('medium', 0)),
+            'general': int(counts.get(_GENERAL_RISK_LEVEL, 0)),
+        })
+
+    return {
+        'top_keywords': top_keywords,
+        'risk_summary': risk_summary,
+        'user_progress': user_progress,
+        'risk_trend': risk_trend,
+    }
+
+
+# ── Routes ──────────────────────────────────────────────────────────
+
+@dashboard_bp.route('/dashboard', methods=['GET'])
+def dashboard_page():
+    return render_template('dashboard.html')
+
+
+@dashboard_bp.route('/api/dashboard/insights', methods=['GET'])
+def get_dashboard_insights():
+    """Summarise conversation and risk insights for care teams."""
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+    try:
+        user_limit = request.args.get('limit', default=10, type=int) or 10
+        lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
+        keyword_limit = request.args.get('keyword_limit', default=10, type=int) or 10
+
+        user_limit = max(1, min(user_limit, 100))
+        lookback_days = max(1, min(lookback_days, 180))
+        keyword_limit = max(1, min(keyword_limit, 50))
+
+        progress_metrics = _collect_dashboard_progress_metrics(
+            lookback_days=lookback_days,
+            per_user_limit=5,
+            keyword_limit=keyword_limit,
+        )
+
+        overview_raw = _db.get_dashboard_overview() or {}
+        overview = {
+            'total_conversations': int(overview_raw.get('total_conversations', 0) or 0),
+            'unique_users': int(overview_raw.get('unique_users', 0) or 0),
+            'important_messages': int(overview_raw.get('important_messages', 0) or 0),
+        }
+
+        try:
+            followup_result = _db_manager.execute_query(
+                'SELECT COUNT(*) FROM follow_ups WHERE status != %s',
+                ('completed',),
+            )
+            active_followups = int(followup_result[0][0]) if followup_result else 0
+        except Exception as exc:
+            logging.warning('Could not fetch follow-up metrics: %s', exc)
+            active_followups = 0
+        overview['active_follow_ups'] = active_followups
+
+        user_summaries = _db.get_recent_user_summaries(limit=user_limit) or []
+        user_progress_map = progress_metrics.get('user_progress', {})
+        formatted_users: List[Dict[str, Any]] = []
+
+        for summary in user_summaries:
+            formatted = dict(summary)
+            parsed = _parse_progress_timestamp(formatted.get('last_interaction'))
+            if parsed:
+                formatted['last_interaction'] = parsed.isoformat()
+
+            total_messages = int(formatted.get('total_messages') or 0)
+            important_messages = int(formatted.get('important_messages') or 0)
+            total_tokens = int(formatted.get('total_tokens') or 0)
+
+            formatted['total_messages'] = total_messages
+            formatted['important_messages'] = important_messages
+            formatted['total_tokens'] = total_tokens
+            formatted['important_ratio'] = (
+                round(important_messages / total_messages, 3)
+                if total_messages else 0.0
+            )
+            formatted['recent_risk_events'] = user_progress_map.get(
+                formatted.get('user_id'), []
+            )
+
+            formatted_users.append(formatted)
+
+        total_users = len(formatted_users)
+        total_messages_all = sum(user['total_messages'] for user in formatted_users)
+        important_messages_all = sum(user['important_messages'] for user in formatted_users)
+        total_tokens_all = sum(user['total_tokens'] for user in formatted_users)
+        high_focus_users = sum(
+            1 for user in formatted_users
+            if user.get('important_ratio', 0) >= 0.4
+        )
+        growth_watch_users = sum(
+            1 for user in formatted_users
+            if 0.15 <= user.get('important_ratio', 0) < 0.4
+        )
+        monitor_users = max(total_users - high_focus_users - growth_watch_users, 0)
+        returning_users = sum(1 for user in formatted_users if user['total_messages'] >= 10)
+        deep_conversation_users = sum(
+            1 for user in formatted_users
+            if user['total_tokens'] >= 2000
+        )
+        avg_messages_per_user = (
+            round(total_messages_all / total_users, 1)
+            if total_users
+            else 0.0
+        )
+        avg_tokens_per_message = (
+            round(total_tokens_all / total_messages_all, 2)
+            if total_messages_all
+            else 0.0
+        )
+        important_share = (
+            round(important_messages_all / total_messages_all, 3)
+            if total_messages_all
+            else 0.0
+        )
+
+        trend_window = min(max(lookback_days, 7), 30)
+        daily_totals = _db.get_recent_daily_message_totals(days=trend_window) or []
+
+        retention_buckets = _db.get_retention_buckets() or []
+        conversation_depth = _db.get_conversation_depth_trend(days=trend_window) or []
+
+        infographic = {
+            'engagement': {
+                'active_users': total_users,
+                'returning_users': returning_users,
+                'avg_messages_per_user': avg_messages_per_user,
+                'high_focus_users': high_focus_users,
+                'growth_watch_users': growth_watch_users,
+                'monitor_users': monitor_users,
+            },
+            'quality': {
+                'important_message_share': important_share,
+                'avg_tokens_per_message': avg_tokens_per_message,
+                'deep_conversation_users': deep_conversation_users,
+                'active_follow_ups': overview.get('active_follow_ups', 0),
+            },
+            'message_trend': daily_totals,
+        }
+
+        risk_summary = progress_metrics.get('risk_summary', {
+            'high': 0,
+            'medium': 0,
+            'general': 0,
+            'unknown': 0,
+        })
+
+        response_payload = {
+            'generated_at': datetime.now().isoformat(),
+            'parameters': {
+                'user_limit': user_limit,
+                'lookback_days': lookback_days,
+                'keyword_limit': keyword_limit,
+            },
+            'overview': overview,
+            'risk_summary': risk_summary,
+            'risk_trend': progress_metrics.get('risk_trend', []),
+            'top_keywords': progress_metrics.get('top_keywords', []),
+            'infographic': infographic,
+            'retention_buckets': retention_buckets,
+            'conversation_depth': conversation_depth,
+            'users': formatted_users,
+        }
+        return jsonify(response_payload)
+
+    except Exception as exc:
+        logging.error('Error generating dashboard insights: %s', exc, exc_info=True)
+        return jsonify({
+            'error': 'dashboard_generation_failed',
+            'message': 'Dashboard insights are unavailable at the moment.',
+        }), 500
+
+
+@dashboard_bp.route('/api/dashboard/users/<user_id>/history', methods=['GET'])
+def get_dashboard_user_history(user_id: str):
+    """Return conversation transcript and risk highlights for a dashboard drill-down."""
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+    if not user_id:
+        return jsonify({'error': 'missing_user_id'}), 400
+
+    limit = request.args.get('limit', default=50, type=int) or 50
+    limit = max(10, min(limit, 200))
+
+    try:
+        history = _db.get_user_conversation_feed(user_id, limit=limit) or []
+        summary = _db.get_user_snapshot(user_id) or {
+            'user_id': user_id,
+            'total_messages': 0,
+            'important_messages': 0,
+            'total_tokens': 0,
+            'important_ratio': 0.0,
+            'last_interaction': None,
+            'first_interaction': None,
+        }
+        if summary.get('user_id') is None:
+            summary['user_id'] = user_id
+
+        risk_events: List[Dict[str, Any]] = []
+        if _redis_client is not None:
+            raw_events = _redis_client.lrange(f"progress:{user_id}", 0, limit - 1)
+            for raw in raw_events:
+                try:
+                    event = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+
+                timestamp = _parse_progress_timestamp(event.get('timestamp'))
+                normalized_level = normalize_risk_level(event.get('risk_level'))
+                risk_events.append({
+                    'timestamp': timestamp.isoformat() if timestamp else event.get('timestamp'),
+                    'risk_level': normalized_level,
+                    'keywords': event.get('keywords') or [],
+                })
+
+        response_payload = {
+            'generated_at': datetime.now().isoformat(),
+            'user_id': user_id,
+            'summary': summary,
+            'history': history,
+            'risk_events': risk_events,
+            'limit': limit,
+        }
+        return jsonify(response_payload)
+    except Exception as exc:
+        logging.error('Error retrieving dashboard user history for %s: %s', user_id, exc, exc_info=True)
+        return jsonify({
+            'error': 'user_history_unavailable',
+            'message': 'ไม่สามารถดึงประวัติการสนทนาได้ในขณะนี้',
+        }), 500
+
+
+def _anonymize_user_id(user_id: str, salt: str = '') -> str:
+    """Hash a user ID for anonymized research export."""
+    return hashlib.sha256(f"{salt}{user_id}".encode()).hexdigest()[:12]
+
+
+@dashboard_bp.route('/api/dashboard/export', methods=['GET'])
+def export_conversations():
+    """Export anonymized conversation data for research.
+
+    Query params:
+        format: 'csv' or 'json' (default: json)
+        start_date: ISO date string (default: 30 days ago)
+        end_date: ISO date string (default: today)
+        limit: max rows (default: 5000, max: 50000)
+        anonymize: 'true'/'false' (default: true)
+    """
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    export_format = request.args.get('format', 'json').lower()
+    if export_format not in ('csv', 'json'):
+        return jsonify({'error': 'invalid_format', 'message': "format must be 'csv' or 'json'"}), 400
+
+    try:
+        end_date = request.args.get('end_date')
+        start_date = request.args.get('start_date')
+        end_dt = datetime.fromisoformat(end_date) if end_date else datetime.now()
+        start_dt = datetime.fromisoformat(start_date) if start_date else end_dt - timedelta(days=30)
+    except ValueError:
+        return jsonify({'error': 'invalid_date', 'message': 'Dates must be ISO format (YYYY-MM-DD)'}), 400
+
+    limit = request.args.get('limit', default=5000, type=int)
+    limit = max(1, min(limit, 50000))
+    anonymize = request.args.get('anonymize', 'true').lower() != 'false'
+    salt = os.getenv('EXPORT_ANONYMIZE_SALT', 'jaidee-research-2026')
+
+    try:
+        query = '''
+            SELECT c.user_id, c.user_message, c.bot_response,
+                   c.timestamp, c.token_count, c.is_important
+            FROM conversations c
+            WHERE c.timestamp BETWEEN %s AND %s
+            ORDER BY c.timestamp ASC
+            LIMIT %s
+        '''
+        rows = _db_manager.execute_query(query, (start_dt, end_dt, limit)) or []
+
+        records: List[Dict[str, Any]] = []
+        for row in rows:
+            user_id_raw = row[0] if row[0] else ''
+            record = {
+                'participant_id': _anonymize_user_id(user_id_raw, salt) if anonymize else user_id_raw,
+                'user_message': row[1] or '',
+                'bot_response': row[2] or '',
+                'timestamp': row[3].isoformat() if hasattr(row[3], 'isoformat') else str(row[3]) if row[3] else '',
+                'token_count': int(row[4]) if row[4] else 0,
+                'is_important': bool(row[5]) if row[5] is not None else False,
+            }
+            records.append(record)
+
+        if export_format == 'csv':
+            output = io.StringIO()
+            if records:
+                writer = csv.DictWriter(output, fieldnames=records[0].keys())
+                writer.writeheader()
+                writer.writerows(records)
+            csv_data = output.getvalue()
+            filename = f"jaidee_export_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.csv"
+            return Response(
+                csv_data,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+            )
+        else:
+            payload = {
+                'exported_at': datetime.now().isoformat(),
+                'parameters': {
+                    'start_date': start_dt.isoformat(),
+                    'end_date': end_dt.isoformat(),
+                    'limit': limit,
+                    'anonymized': anonymize,
+                    'format': export_format,
+                },
+                'total_records': len(records),
+                'data': records,
+            }
+            filename = f"jaidee_export_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.json"
+            return Response(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                mimetype='application/json',
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+            )
+
+    except Exception as exc:
+        logging.error('Error exporting conversations: %s', exc, exc_info=True)
+        return jsonify({
+            'error': 'export_failed',
+            'message': 'ไม่สามารถส่งออกข้อมูลได้ในขณะนี้',
+        }), 500
