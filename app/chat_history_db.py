@@ -578,3 +578,89 @@ class ChatHistoryDB:
             })
 
         return summaries
+
+    @safe_db_operation
+    def get_retention_buckets(self) -> List[Dict[str, Any]]:
+        """Return user distribution by total session (message-pair) count buckets."""
+        query = '''
+            SELECT
+                CASE
+                    WHEN msg_count = 1 THEN '1'
+                    WHEN msg_count BETWEEN 2 AND 5 THEN '2-5'
+                    WHEN msg_count BETWEEN 6 AND 15 THEN '6-15'
+                    WHEN msg_count BETWEEN 16 AND 30 THEN '16-30'
+                    ELSE '31+'
+                END AS bucket,
+                COUNT(*) AS user_count
+            FROM (
+                SELECT user_id, COUNT(*) AS msg_count
+                FROM conversations
+                GROUP BY user_id
+            ) AS per_user
+            GROUP BY bucket
+            ORDER BY FIELD(bucket, '1', '2-5', '6-15', '16-30', '31+')
+        '''
+
+        rows = self.db.execute_query(query)
+        buckets: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                buckets.append({
+                    'bucket': row.get('bucket', ''),
+                    'user_count': int(row.get('user_count') or 0),
+                })
+            else:
+                buckets.append({
+                    'bucket': row[0],
+                    'user_count': int(row[1] or 0),
+                })
+        return buckets
+
+    @safe_db_operation
+    def get_conversation_depth_trend(self, days: int = 30) -> List[Dict[str, Any]]:
+        """Return daily averages of messages-per-user and tokens-per-message."""
+        days = max(1, min(int(days or 0), 180))
+        cutoff = datetime.now() - timedelta(days=days - 1)
+
+        query = '''
+            SELECT
+                DATE(timestamp) AS day_value,
+                COUNT(DISTINCT user_id) AS active_users,
+                COUNT(*) AS total_messages,
+                COALESCE(SUM(token_count), 0) AS total_tokens
+            FROM conversations
+            WHERE timestamp >= %s
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+        '''
+
+        rows = self.db.execute_query(query, (cutoff,))
+        trend: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                day_value = row.get('day_value') or row.get('date')
+                active_users = int(row.get('active_users') or 0)
+                total_messages = int(row.get('total_messages') or 0)
+                total_tokens = int(row.get('total_tokens') or 0)
+            else:
+                day_value, active_users, total_messages, total_tokens = row
+                active_users = int(active_users or 0)
+                total_messages = int(total_messages or 0)
+                total_tokens = int(total_tokens or 0)
+
+            if isinstance(day_value, datetime):
+                day_str = day_value.date().isoformat()
+            else:
+                day_str = str(day_value) if day_value is not None else None
+
+            avg_msgs = round(total_messages / active_users, 1) if active_users else 0
+            avg_tokens = round(total_tokens / total_messages, 1) if total_messages else 0
+
+            trend.append({
+                'date': day_str,
+                'active_users': active_users,
+                'total_messages': total_messages,
+                'avg_messages_per_user': avg_msgs,
+                'avg_tokens_per_message': avg_tokens,
+            })
+        return trend

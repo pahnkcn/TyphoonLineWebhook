@@ -276,11 +276,13 @@ def _collect_dashboard_progress_metrics(
     display_lookup: Dict[str, str] = {}
     risk_counter: Counter[str] = Counter()
     user_progress: Dict[str, List[Dict[str, Any]]] = {}
+    daily_risk: Dict[str, Counter] = {}  # date_str -> Counter of risk levels
     if redis_client is None:
         return {
             'top_keywords': [],
             'risk_summary': {'high': 0, 'medium': 0, 'general': 0, 'unknown': 0},
             'user_progress': {},
+            'risk_trend': [],
         }
 
     cutoff = datetime.now() - timedelta(days=max(1, lookback_days))
@@ -301,6 +303,12 @@ def _collect_dashboard_progress_metrics(
                 risk_level = normalize_risk_level(raw_level)
                 keywords = entry.get('keywords') or []
                 risk_counter[risk_level] += 1
+
+                if timestamp and timestamp >= cutoff:
+                    day_key = timestamp.date().isoformat()
+                    if day_key not in daily_risk:
+                        daily_risk[day_key] = Counter()
+                    daily_risk[day_key][risk_level] += 1
 
                 if risk_level in ('high', 'medium') and len(recent_events) < limit_per_user:
                     recent_events.append({
@@ -343,10 +351,21 @@ def _collect_dashboard_progress_metrics(
     )
     risk_summary['unknown'] = int(unknown_total)
 
+    risk_trend: List[Dict[str, Any]] = []
+    for day_key in sorted(daily_risk.keys()):
+        counts = daily_risk[day_key]
+        risk_trend.append({
+            'date': day_key,
+            'high': int(counts.get('high', 0)),
+            'medium': int(counts.get('medium', 0)),
+            'general': int(counts.get(GENERAL_RISK_LEVEL, 0)),
+        })
+
     return {
         'top_keywords': top_keywords,
         'risk_summary': risk_summary,
         'user_progress': user_progress,
+        'risk_trend': risk_trend,
     }
 
 
@@ -454,6 +473,9 @@ def get_dashboard_insights():
         trend_window = min(max(lookback_days, 7), 30)
         daily_totals = db.get_recent_daily_message_totals(days=trend_window) or []
 
+        retention_buckets = db.get_retention_buckets() or []
+        conversation_depth = db.get_conversation_depth_trend(days=trend_window) or []
+
         infographic = {
             'engagement': {
                 'active_users': total_users,
@@ -488,8 +510,11 @@ def get_dashboard_insights():
             },
             'overview': overview,
             'risk_summary': risk_summary,
+            'risk_trend': progress_metrics.get('risk_trend', []),
             'top_keywords': progress_metrics.get('top_keywords', []),
             'infographic': infographic,
+            'retention_buckets': retention_buckets,
+            'conversation_depth': conversation_depth,
             'users': formatted_users,
         }
         return jsonify(response_payload)
