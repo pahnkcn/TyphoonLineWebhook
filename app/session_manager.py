@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Tuple
+from linebot.models import TextSendMessage
 
 redis_client = None
 line_bot_api = None
@@ -62,20 +63,25 @@ def save_chat_session(user_id: str, messages: List[Dict[str, str]]) -> None:
         # This ensures token count and session are always in sync
         pipe = redis_client.pipeline()
 
-        pipe.setex(
-            f"chat_session:{user_id}",
-            ttl_seconds,
-            json.dumps(serialized_history),
-        )
+        if pipe is None:
+            # Redis unavailable — fall back to individual (non-atomic) calls
+            redis_client.setex(f"chat_session:{user_id}", ttl_seconds, json.dumps(serialized_history))
+            redis_client.setex(f"session_tokens:{user_id}", ttl_seconds, str(token_count))
+        else:
+            pipe.setex(
+                f"chat_session:{user_id}",
+                ttl_seconds,
+                json.dumps(serialized_history),
+            )
 
-        pipe.setex(
-            f"session_tokens:{user_id}",
-            ttl_seconds,
-            str(token_count),
-        )
+            pipe.setex(
+                f"session_tokens:{user_id}",
+                ttl_seconds,
+                str(token_count),
+            )
 
-        # Execute all commands atomically
-        pipe.execute()
+            # Execute all commands atomically
+            pipe.execute()
 
         logging.debug(
             f"บันทึกเซสชัน: {len(serialized_history)} ข้อความ, {token_count} โทเค็น "

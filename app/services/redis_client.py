@@ -244,6 +244,19 @@ class ResilientRedisClient:
         result = self._safe_execute('ltrim', key, start, end)
         return bool(result) if result is not _MISS else False
 
+    def ttl(self, key: str) -> int:
+        result = self._safe_execute('ttl', key)
+        return result if result is not _MISS else -2
+
+    def setnx(self, key: str, value) -> bool:
+        self._fallback.set(key, value if isinstance(value, str) else str(value))
+        result = self._safe_execute('setnx', key, value)
+        return bool(result) if result is not _MISS else True
+
+    def hgetall(self, name: str) -> dict:
+        result = self._safe_execute('hgetall', name)
+        return result if result is not _MISS else {}
+
     def hset(self, name: str, key: str = None, value: str = None, mapping: dict = None):
         if mapping:
             return self._safe_execute('hset', name, mapping=mapping)

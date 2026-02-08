@@ -18,7 +18,8 @@ from ..risk_assessment import normalize_risk_level, RISK_KEYWORDS
 dashboard_bp = Blueprint('dashboard', __name__)
 
 # CORS for dashboard API endpoints only (not the whole app)
-CORS(dashboard_bp, resources={r"/api/dashboard/*": {"origins": "*", "methods": ["GET", "OPTIONS"]}})
+_dashboard_cors_origins = os.getenv('DASHBOARD_CORS_ORIGINS', '').split(',') if os.getenv('DASHBOARD_CORS_ORIGINS') else []
+CORS(dashboard_bp, resources={r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]}})
 
 
 @dashboard_bp.after_request

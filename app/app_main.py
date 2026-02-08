@@ -104,37 +104,14 @@ _xai_circuit_breaker = CircuitBreaker(
     name='xai_api',
     failure_threshold=5,
     timeout=300,  # 5 นาที
-    expected_exception=(Exception,)
+    expected_exception=(requests.exceptions.RequestException, ConnectionError, TimeoutError, OSError)
 )
 _line_circuit_breaker = CircuitBreaker(
     name='line_api',
     failure_threshold=3,
     timeout=180,  # 3 นาที
-    expected_exception=(Exception,)
+    expected_exception=(requests.exceptions.RequestException, LineBotApiError, ConnectionError, TimeoutError, OSError)
 )
-
-# Dashboard API authentication — read key once at module load
-_DASHBOARD_API_KEY: str = os.getenv('DASHBOARD_API_KEY', '')
-if not _DASHBOARD_API_KEY:
-    logging.warning("DASHBOARD_API_KEY not set — dashboard endpoints are unprotected")
-
-def _require_dashboard_auth():
-    """Validate dashboard API key from Authorization header or query param.
-    Returns (True, None) if valid, or (False, error_response) if invalid."""
-    if not _DASHBOARD_API_KEY:
-        return True, None
-    # Check Authorization: Bearer <key> header first
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header.startswith('Bearer '):
-        token = auth_header[7:]
-        if hmac.compare_digest(token, _DASHBOARD_API_KEY):
-            return True, None
-    # Fallback: check query parameter (deprecated — prefer Authorization header)
-    token = request.args.get('api_key', '')
-    if token and hmac.compare_digest(token, _DASHBOARD_API_KEY):
-        logging.warning("Dashboard API key passed via query parameter — use Authorization header instead")
-        return True, None
-    return False, (jsonify({"error": "Unauthorized"}), 401)
 
 # ค่าคงที่ส่วนของการแอพลิเคชัน
 FOLLOW_UP_INTERVALS = [1, 3, 7, 14, 30]  # จำนวนวันในการติดตาม
@@ -485,10 +462,10 @@ def save_user_initial_context(user_id, ai_summary):
     try:
         # บันทึกบริบทใน Redis โดยไม่มีเวลาหมดอายุ
         context_key = f"user_context:{user_id}"
-        redis_client.set(context_key, ai_summary)
+        redis_client.setex(context_key, 7776000, ai_summary)  # 90 days TTL
         
         # บันทึกเวลาที่สร้างบริบท
-        redis_client.set(f"context_created:{user_id}", datetime.now().timestamp())
+        redis_client.setex(f"context_created:{user_id}", 7776000, str(datetime.now().timestamp()))
         
         logging.info(f"บันทึกบริบทเริ่มต้นสำหรับผู้ใช้: {user_id}")
         
@@ -1021,100 +998,24 @@ def get_risk_level_from_score(substance, score):
         else:
             return 'ความเสี่ยงสูง'
 
-def process_conversation_data(user_id, user_message, bot_response, messages):
-    """
-    ประมวลผลและบันทึกข้อมูลการสนทนา พร้อมกับตรวจสอบความเสี่ยง
+def _send_token_threshold_warning(user_id: str):
+    """ตรวจสอบโทเค็นและแจ้งเตือนถ้าเข้าใกล้ขีดจำกัด (เรียกจาก background thread)"""
+    try:
+        session_token_count = get_session_token_count(user_id)
+        token_threshold_warning = TOKEN_THRESHOLD * 0.70  # แจ้งเตือนที่ 70% ของขีดจำกัด
 
-    Args:
-        user_id (str): LINE User ID
-        user_message (str): ข้อความของผู้ใช้
-        bot_response (str): การตอบกลับของบอท
-        messages (list): ข้อความทั้งหมดในเซสชัน
-    """
-    # นับโทเค็นสำหรับการสนทนาคู่นี้
-    message_token_count = token_counter.count_tokens(user_message + bot_response)
-
-    # ประเมินความเสี่ยง
-    risk_level, keywords = assess_risk(user_message)
-    save_progress_data(user_id, risk_level, keywords)
-
-    # ตรวจสอบว่าข้อความนี้สำคัญหรือไม่ (ใช้ risk_level จาก assess_risk โดยตรง)
-    is_important = is_important_message(user_message, bot_response, risk_level=risk_level)
-
-    # บันทึกการสนทนาและกำหนดการติดตาม
-    save_chat_session(user_id, messages)
-    db.save_conversation(
-        user_id=user_id,
-        user_message=user_message,
-        bot_response=bot_response,
-        token_count=message_token_count,  # บันทึกเฉพาะโทเค็นของข้อความคู่นี้
-        important=is_important
-    )
-
-    # กำหนดการติดตามโดยยึดวันแรกที่ผู้ใช้เริ่มสนทนา
-    # ถ้ามีการกำหนดการติดตามค้างอยู่จะไม่ถูกปรับใหม่
-    schedule_follow_up(user_id, None)
-
-    # ส่งการแจ้งเตือนถ้าพบความเสี่ยงสูง
-    if risk_level == 'high':
-        # แจ้งเตือน admin ผ่าน LINE Notify
-        alert_high_risk_user(user_id, risk_level, keywords)
-
-        # เลือกข้อความฉุกเฉินตามประเภทความเสี่ยง
-        risk_category = classify_risk_category(keywords)
-        if risk_category == "suicide":
-            emergency_message = (
-                "⚠️ น้องใจดีเป็นห่วงคุณมากครับ\n\n"
-                "ถ้าคุณกำลังคิดจะทำร้ายตัวเอง กรุณาโทรหาผู้เชี่ยวชาญทันที:\n"
-                "📞 สายด่วนสุขภาพจิต: 1323 (24 ชั่วโมง)\n"
-                "📞 สายด่วนป้องกันการฆ่าตัวตาย: 1323 กด 1\n\n"
-                "คุณมีคุณค่า และคุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง"
+        if session_token_count > token_threshold_warning and not redis_client.exists(f"token_warning:{user_id}"):
+            warning_message = (
+                "📊 ข้อควรทราบ: ประวัติการสนทนาของเรากำลังเติบโต ระบบอาจจะต้องสรุปบางส่วน"
+                "ในการสนทนาต่อไปเพื่อรักษาประสิทธิภาพ\n\n"
+                f"• โทเค็นในเซสชันปัจจุบัน: {session_token_count:,} จาก {TOKEN_THRESHOLD:,} ({(session_token_count/TOKEN_THRESHOLD*100):.1f}%)\n"
+                "• คุณสามารถใช้คำสั่ง /optimize เพื่อปรับปรุงประวัติการสนทนาได้ทุกเมื่อ"
             )
-        elif risk_category == "overdose":
-            emergency_message = (
-                "🚨 หากคุณหรือคนใกล้ตัวกำลังมีอาการจากการใช้สารเกินขนาด\n\n"
-                "กรุณาโทรขอความช่วยเหลือทันที:\n"
-                "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n"
-                "📞 ศูนย์พิษวิทยา: 1367\n"
-                "📞 สายด่วนยาเสพติด: 1165\n\n"
-                "อย่ารอให้อาการหนักขึ้น การโทรขอความช่วยเหลือเร็วช่วยชีวิตได้"
-            )
-        else:
-            emergency_message = (
-                "⚠️ น้องใจดีกังวลว่าคุณอาจกำลังเผชิญกับภาวะเสี่ยง\n\n"
-                "ขอแนะนำให้ติดต่อผู้เชี่ยวชาญเพื่อรับความช่วยเหลือโดยเร็วที่สุด:\n"
-                "📞 สายด่วนสุขภาพจิต: 1323\n"
-                "📞 สายด่วนยาเสพติด: 1165\n"
-                "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n\n"
-                "คุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง การขอความช่วยเหลือคือความกล้าหาญ"
-            )
-        send_final_response(user_id, emergency_message)
-
-    # ตรวจสอบโทเค็นและแจ้งเตือนถ้าเข้าใกล้ขีดจำกัด
-    session_token_count = get_session_token_count(user_id)
-    token_threshold_warning = TOKEN_THRESHOLD * 0.70  # แจ้งเตือนที่ 70% ของขีดจำกัด
-
-    if session_token_count > token_threshold_warning and not redis_client.exists(f"token_warning:{user_id}"):
-        # ส่งการแจ้งเตือนเรื่องโทเค็น
-        warning_message = (
-            "📊 ข้อควรทราบ: ประวัติการสนทนาของเรากำลังเติบโต ระบบอาจจะต้องสรุปบางส่วน"
-            "ในการสนทนาต่อไปเพื่อรักษาประสิทธิภาพ\n\n"
-            f"• โทเค็นในเซสชันปัจจุบัน: {session_token_count:,} จาก {TOKEN_THRESHOLD:,} ({(session_token_count/TOKEN_THRESHOLD*100):.1f}%)\n"
-            "• คุณสามารถใช้คำสั่ง /optimize เพื่อปรับปรุงประวัติการสนทนาได้ทุกเมื่อ"
-        )
-
-        # ตั้งค่าเวลาหมดอายุของการแจ้งเตือน (30 นาที)
-        redis_client.setex(f"token_warning:{user_id}", 1800, "1")
-
-        # ส่งข้อความแจ้งเตือนหลังจากการตอบกลับปกติเล็กน้อย
-        def send_delayed_warning():
-            time.sleep(3)  # รอ 3 วินาทีหลังจากส่งการตอบกลับปกติ
+            redis_client.setex(f"token_warning:{user_id}", 1800, "1")
+            time.sleep(3)
             send_final_response(user_id, warning_message)
-
-        # เริ่ม thread ใหม่เพื่อส่งการแจ้งเตือนแบบหน่วงเวลา
-        warning_thread = threading.Thread(target=send_delayed_warning)
-        warning_thread.daemon = True
-        warning_thread.start()
+    except Exception as e:
+        logging.debug(f"Token threshold warning check failed for {user_id}: {e}")
 
 # ฟังก์ชันสำหรับการจัดการข้อความที่ถูกล็อค
 
@@ -1244,16 +1145,13 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
                     )
                     
             except RateLimitError as e:
-                # จัดการ rate limit แบบพิเศษ
+                # จัดการ rate limit — ไม่ sleep เพื่อไม่บล็อก thread pool
                 wait_time = e.retry_after if hasattr(e, 'retry_after') else 60
-                logging.warning(f"Rate limited, waiting {wait_time} seconds")
-                
-                # ส่งข้อความแจ้งผู้ใช้
+                logging.warning(f"Rate limited (retry_after={wait_time}s), using fallback response")
                 send_rate_limit_notification(user_id, wait_time)
-                
-                # รอแล้วลองใหม่
-                time.sleep(wait_time)
-                retry_count += 1
+                bot_response = generate_fallback_response(user_message, user_context)
+                fallback_response = bot_response
+                break
                 
             except Exception as e:
                 logging.error(f"AI API error (attempt {retry_count + 1}): {str(e)}")
@@ -1346,6 +1244,9 @@ def _post_response_background(
         effective_error = error_occurred or save_failed
         if fallback_response or effective_error:
             send_system_notification(user_id, fallback_response is not None, effective_error)
+
+        # ตรวจสอบ token threshold และแจ้งเตือนถ้าจำเป็น
+        _send_token_threshold_warning(user_id)
 
         # บันทึกเวลาประมวลผลและ metrics
         total_time = time.time() - start_time
@@ -1603,7 +1504,7 @@ def generate_fallback_response(user_message: str, user_context: Optional[str]) -
 
 
 def process_conversation_data_safely(user_id: str, user_message: str, bot_response: str, messages: List[Dict[str, str]]):
-    """บันทึกข้อมูลการสนทนาแบบปลอดภัย"""
+    """บันทึกข้อมูลการสนทนาแบบปลอดภัย พร้อมแจ้งเตือนกรณีความเสี่ยงสูง"""
     try:
         # ใช้ transaction-like approach
         temp_data = {
@@ -1623,6 +1524,8 @@ def process_conversation_data_safely(user_id: str, user_message: str, bot_respon
             queue_for_retry('redis_save', temp_data)
         
         # บันทึกลงฐานข้อมูล
+        risk_level = None
+        keywords = []
         try:
             message_token_count = token_counter.count_tokens(user_message + bot_response)
             risk_level, keywords = assess_risk(user_message)
@@ -1641,6 +1544,51 @@ def process_conversation_data_safely(user_id: str, user_message: str, bot_respon
         except Exception as e:
             logging.error(f"Failed to save to database: {str(e)}")
             queue_for_retry('db_save', temp_data)
+
+        # แจ้งเตือน admin และส่งข้อความฉุกเฉินถ้าพบความเสี่ยงสูง
+        if risk_level == 'high':
+            try:
+                alert_high_risk_user(user_id, risk_level, keywords)
+            except Exception as e:
+                logging.error(f"Failed to alert admin for high-risk user {user_id}: {e}")
+
+            try:
+                risk_category = classify_risk_category(keywords)
+                if risk_category == "suicide":
+                    emergency_message = (
+                        "⚠️ น้องใจดีเป็นห่วงคุณมากครับ\n\n"
+                        "ถ้าคุณกำลังคิดจะทำร้ายตัวเอง กรุณาโทรหาผู้เชี่ยวชาญทันที:\n"
+                        "📞 สายด่วนสุขภาพจิต: 1323 (24 ชั่วโมง)\n"
+                        "📞 สายด่วนป้องกันการฆ่าตัวตาย: 1323 กด 1\n\n"
+                        "คุณมีคุณค่า และคุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง"
+                    )
+                elif risk_category == "overdose":
+                    emergency_message = (
+                        "🚨 หากคุณหรือคนใกล้ตัวกำลังมีอาการจากการใช้สารเกินขนาด\n\n"
+                        "กรุณาโทรขอความช่วยเหลือทันที:\n"
+                        "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n"
+                        "📞 ศูนย์พิษวิทยา: 1367\n"
+                        "📞 สายด่วนยาเสพติด: 1165\n\n"
+                        "อย่ารอให้อาการหนักขึ้น การโทรขอความช่วยเหลือเร็วช่วยชีวิตได้"
+                    )
+                else:
+                    emergency_message = (
+                        "⚠️ น้องใจดีกังวลว่าคุณอาจกำลังเผชิญกับภาวะเสี่ยง\n\n"
+                        "ขอแนะนำให้ติดต่อผู้เชี่ยวชาญเพื่อรับความช่วยเหลือโดยเร็วที่สุด:\n"
+                        "📞 สายด่วนสุขภาพจิต: 1323\n"
+                        "📞 สายด่วนยาเสพติด: 1165\n"
+                        "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n\n"
+                        "คุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง การขอความช่วยเหลือคือความกล้าหาญ"
+                    )
+                send_final_response(user_id, emergency_message)
+            except Exception as e:
+                logging.error(f"Failed to send emergency message to {user_id}: {e}")
+
+        # Invalidate history cache after saving new data
+        try:
+            redis_client.delete(f"history_cache:{user_id}")
+        except Exception:
+            pass
         
         # กำหนดการติดตาม
         try:
@@ -2294,6 +2242,7 @@ def check_line_api_health():
 
 _grok_health_cache: Dict[str, Any] = {'healthy': None, 'checked_at': 0.0}
 _GROK_HEALTH_CACHE_TTL = 300  # 5 นาที
+_grok_health_lock = threading.Lock()
 
 def check_grok_api_health():
     """ตรวจสอบการเชื่อมต่อ xAI Grok API (cached เพื่อลดค่าใช้จ่ายโทเค็น)"""
@@ -2303,9 +2252,10 @@ def check_grok_api_health():
     if _xai_circuit_breaker.state.value == 'open':
         return False
 
-    # ใช้ค่า cache ถ้ายังไม่หมดอายุ
-    if _grok_health_cache['healthy'] is not None and (now - _grok_health_cache['checked_at']) < _GROK_HEALTH_CACHE_TTL:
-        return _grok_health_cache['healthy']
+    # ใช้ค่า cache ถ้ายังไม่หมดอายุ (check under lock to prevent thundering herd)
+    with _grok_health_lock:
+        if _grok_health_cache['healthy'] is not None and (now - _grok_health_cache['checked_at']) < _GROK_HEALTH_CACHE_TTL:
+            return _grok_health_cache['healthy']
 
     try:
         _ = grok_client.send_chat(
@@ -2313,13 +2263,15 @@ def check_grok_api_health():
             model=config.XAI_MODEL,
             max_tokens=1,
         )
-        _grok_health_cache['healthy'] = True
-        _grok_health_cache['checked_at'] = now
+        with _grok_health_lock:
+            _grok_health_cache['healthy'] = True
+            _grok_health_cache['checked_at'] = now
         return True
     except Exception as e:
         logging.debug(f"xAI Grok API health check failed: {str(e)}")
-        _grok_health_cache['healthy'] = False
-        _grok_health_cache['checked_at'] = now
+        with _grok_health_lock:
+            _grok_health_cache['healthy'] = False
+            _grok_health_cache['checked_at'] = now
         return False
 
 def get_uptime():
