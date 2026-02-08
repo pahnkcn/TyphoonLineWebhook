@@ -297,6 +297,7 @@ app.register_blueprint(dashboard_bp)
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
+@limiter.exempt
 def health_check():
     """
     Health check endpoint for monitoring

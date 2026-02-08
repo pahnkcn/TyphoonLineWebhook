@@ -37,13 +37,6 @@ def init_limiter(app):
             "retry_after": getattr(e, "retry_after", 60)
         }), 429
     
-    # ตั้งค่าขีดจำกัดเฉพาะสำหรับเส้นทางต่างๆ
-    limiter.limit("10/minute")(app.route("/callback", methods=["POST"]))
-    limiter.limit("60/hour")(app.route("/health", methods=["GET"]))
-    
-    # ยกเว้นเส้นทางบางอย่างจากการจำกัดอัตรา
-    limiter.exempt(app.route("/favicon.ico"))
-    
     return limiter
 
 def get_custom_limiter(redis_client, app=None):
