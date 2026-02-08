@@ -203,20 +203,22 @@ def get_session_token_count(user_id: str) -> int:
         return 0
 
 
-def is_important_message(user_message: str, bot_response: str) -> bool:
-    """Determine if a message pair is important."""
-    important_keywords = [
-        'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย',
-        'overdose', 'เกินขนาด', 'ก้าวร้าว',
-        'ซึมเศร้า', 'วิตกกังวล', 'ความทรงจำ',
-        'ไม่มีความสุข', 'ทรมาน', 'เครียด',
-        'เลิก', 'หยุด', 'อดทน', 'ยา', 'เสพ',
-        'บำบัด', 'กลับไปเสพ', 'อาการ', 'ถอนยา'
-    ]
-    combined_text = (user_message + " " + bot_response).lower()
-    for keyword in important_keywords:
-        if keyword.lower() in combined_text:
+def is_important_message(user_message: str, bot_response: str, risk_level: str = None) -> bool:
+    """Determine if a message pair is important.
+
+    ใช้ risk_level จาก assess_risk() เป็นตัวตัดสินหลัก:
+    - risk_level == 'high' หรือ 'medium' → สำคัญ (ยกเว้น general)
+    - ข้อความยาวผิดปกติ → สำคัญ (บ่งบอกว่าผู้ใช้เปิดเผยเรื่องสำคัญ)
+
+    เมื่อ risk_level ถูกส่งมา จะไม่ใช้ keyword list แยกอีกต่อไป
+    (keyword list เดิมถูกรวมเข้า RISK_KEYWORDS ใน risk_assessment.py แล้ว)
+    """
+    if risk_level is not None:
+        if risk_level in ('high', 'medium'):
             return True
+        if len(user_message) > 300 or len(bot_response) > 500:
+            return True
+        return False
     if len(user_message) > 300 or len(bot_response) > 500:
         return True
     return False

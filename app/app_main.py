@@ -70,12 +70,14 @@ from .session_manager import (
 from .risk_assessment import (
     init_risk_assessment,
     assess_risk,
+    classify_risk_category,
     save_progress_data,
     generate_progress_report,
     RISK_KEYWORDS,
     GENERAL_RISK_LEVEL,
     normalize_risk_level,
 )
+from .services.admin_alerting import alert_high_risk_user
 from .database_init import initialize_database
 from .database_manager import DatabaseManager
 from .error_handling import (
@@ -1035,10 +1037,8 @@ def process_conversation_data(user_id, user_message, bot_response, messages):
     risk_level, keywords = assess_risk(user_message)
     save_progress_data(user_id, risk_level, keywords)
 
-    # ตรวจสอบว่าข้อความนี้สำคัญหรือไม่
-    is_important = is_important_message(user_message, bot_response)
-    if risk_level == GENERAL_RISK_LEVEL:
-        is_important = False
+    # ตรวจสอบว่าข้อความนี้สำคัญหรือไม่ (ใช้ risk_level จาก assess_risk โดยตรง)
+    is_important = is_important_message(user_message, bot_response, risk_level=risk_level)
 
     # บันทึกการสนทนาและกำหนดการติดตาม
     save_chat_session(user_id, messages)
@@ -1056,14 +1056,37 @@ def process_conversation_data(user_id, user_message, bot_response, messages):
 
     # ส่งการแจ้งเตือนถ้าพบความเสี่ยงสูง
     if risk_level == 'high':
-        emergency_message = (
-            "⚠️ น้องใจดีกังวลว่าคุณอาจกำลังเผชิญกับภาวะเสี่ยง\n\n"
-            "ขอแนะนำให้ติดต่อผู้เชี่ยวชาญเพื่อรับความช่วยเหลือโดยเร็วที่สุด:\n"
-            "📞 สายด่วนสุขภาพจิต: 1323\n"
-            "📞 สายด่วนยาเสพติด: 1165\n"
-            "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n\n"
-            "คุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง การขอความช่วยเหลือคือความกล้าหาญ"
-        )
+        # แจ้งเตือน admin ผ่าน LINE Notify
+        alert_high_risk_user(user_id, risk_level, keywords)
+
+        # เลือกข้อความฉุกเฉินตามประเภทความเสี่ยง
+        risk_category = classify_risk_category(keywords)
+        if risk_category == "suicide":
+            emergency_message = (
+                "⚠️ น้องใจดีเป็นห่วงคุณมากครับ\n\n"
+                "ถ้าคุณกำลังคิดจะทำร้ายตัวเอง กรุณาโทรหาผู้เชี่ยวชาญทันที:\n"
+                "📞 สายด่วนสุขภาพจิต: 1323 (24 ชั่วโมง)\n"
+                "📞 สายด่วนป้องกันการฆ่าตัวตาย: 1323 กด 1\n\n"
+                "คุณมีคุณค่า และคุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง"
+            )
+        elif risk_category == "overdose":
+            emergency_message = (
+                "🚨 หากคุณหรือคนใกล้ตัวกำลังมีอาการจากการใช้สารเกินขนาด\n\n"
+                "กรุณาโทรขอความช่วยเหลือทันที:\n"
+                "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n"
+                "📞 ศูนย์พิษวิทยา: 1367\n"
+                "📞 สายด่วนยาเสพติด: 1165\n\n"
+                "อย่ารอให้อาการหนักขึ้น การโทรขอความช่วยเหลือเร็วช่วยชีวิตได้"
+            )
+        else:
+            emergency_message = (
+                "⚠️ น้องใจดีกังวลว่าคุณอาจกำลังเผชิญกับภาวะเสี่ยง\n\n"
+                "ขอแนะนำให้ติดต่อผู้เชี่ยวชาญเพื่อรับความช่วยเหลือโดยเร็วที่สุด:\n"
+                "📞 สายด่วนสุขภาพจิต: 1323\n"
+                "📞 สายด่วนยาเสพติด: 1165\n"
+                "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n\n"
+                "คุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง การขอความช่วยเหลือคือความกล้าหาญ"
+            )
         send_final_response(user_id, emergency_message)
 
     # ตรวจสอบโทเค็นและแจ้งเตือนถ้าเข้าใกล้ขีดจำกัด
@@ -1183,6 +1206,9 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         # 3. เพิ่มข้อความของผู้ใช้
         messages.append({"role": "user", "content": user_message})
         
+        # 3.5 ประเมินความเสี่ยงล่วงหน้าเพื่อเลือก AI config ที่เหมาะสม
+        pre_risk_level, _ = assess_risk(user_message)
+        
         # 4. เรียก AI API พร้อม retry mechanism (2 retries + grok_client built-in retry = 4 max)
         bot_response = None
         max_retries = 2
@@ -1190,7 +1216,7 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         while retry_count < max_retries and bot_response is None:
             try:
-                response_text = generate_ai_response_with_timeout(messages, timeout=30, user_id=user_id)
+                response_text = generate_ai_response_with_timeout(messages, timeout=30, user_id=user_id, risk_level=pre_risk_level)
                 
                 if not response_text:
                     raise ValueError("Empty AI response")
@@ -1433,8 +1459,12 @@ def create_minimal_session(user_context: Optional[str]) -> List[Dict[str, str]]:
     return messages
 
 
-def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30, user_id: str = "system") -> str:
-    """เรียก xAI Grok API พร้อม timeout และคืนข้อความตอบกลับ"""
+def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30, user_id: str = "system", risk_level: str = None) -> str:
+    """เรียก xAI Grok API พร้อม timeout และคืนข้อความตอบกลับ
+
+    Args:
+        risk_level: ผล assess_risk() ถ้ามี — ถ้า 'high' จะใช้ CRISIS_CONFIG โดยตรง
+    """
     filtered_messages = filter_messages_for_api(messages)
 
     # ใช้ SYSTEM_MESSAGE_CORE แทน SYSTEM_MESSAGES เต็ม เพื่อลด token overhead
@@ -1447,15 +1477,18 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
 
     effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
 
-    # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
-    user_message = ""
-    for msg in reversed(filtered_messages):
-        if msg.get("role") == "user":
-            user_message = msg.get("content", "")
-            break
-
-    # เลือก config แบบ dynamic ตามบริบท
-    dynamic_config = get_dynamic_config(user_message, filtered_messages)
+    # เลือก config: ถ้า risk_level == 'high' ใช้ CRISIS_CONFIG โดยตรง (ไม่ต้อง keyword match ซ้ำ)
+    if risk_level == 'high':
+        logging.info("Using CRISIS_CONFIG based on assess_risk result")
+        dynamic_config = CRISIS_CONFIG
+    else:
+        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+        user_message = ""
+        for msg in reversed(filtered_messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+        dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
     def _call() -> str:
         return _xai_circuit_breaker.call(
@@ -1529,19 +1562,34 @@ def _calculate_adaptive_timeout(api_messages: List[Dict[str, str]], base_timeout
 
 
 def generate_fallback_response(user_message: str, user_context: Optional[str]) -> str:
-    """สร้างคำตอบสำรองเมื่อ AI API ไม่ทำงาน"""
-    # ตรวจสอบประเภทของคำถาม
-    message_lower = user_message.lower()
-    
-    # คำตอบสำหรับกรณีฉุกเฉิน
-    if any(word in message_lower for word in ['ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย']):
-        return (
-            "ใจดีเข้าใจว่าคุณกำลังผ่านช่วงเวลาที่ยากลำบาก\n\n"
-            "⚠️ กรุณาติดต่อสายด่วนสุขภาพจิต 1323 ทันที\n"
-            "หรือโทร 1669 หากต้องการความช่วยเหลือฉุกเฉิน\n\n"
-            "คุณไม่ได้อยู่คนเดียว มีคนพร้อมช่วยเหลือคุณตลอด 24 ชั่วโมง"
-        )
-    
+    """สร้างคำตอบสำรองเมื่อ AI API ไม่ทำงาน — ใช้ assess_risk() แทน hardcoded keywords"""
+    risk_level, keywords = assess_risk(user_message)
+
+    if risk_level == 'high':
+        risk_category = classify_risk_category(keywords)
+        if risk_category == "suicide":
+            return (
+                "ใจดีเข้าใจว่าคุณกำลังผ่านช่วงเวลาที่ยากลำบาก\n\n"
+                "⚠️ กรุณาติดต่อสายด่วนสุขภาพจิต 1323 ทันที\n"
+                "📞 สายด่วนป้องกันการฆ่าตัวตาย: 1323 กด 1\n\n"
+                "คุณไม่ได้อยู่คนเดียว มีคนพร้อมช่วยเหลือคุณตลอด 24 ชั่วโมง"
+            )
+        elif risk_category == "overdose":
+            return (
+                "🚨 หากมีอาการจากการใช้สารเกินขนาด กรุณาโทรทันที:\n\n"
+                "📞 หน่วยกู้ชีพฉุกเฉิน: 1669\n"
+                "📞 สายด่วนยาเสพติด: 1165\n\n"
+                "อย่ารอให้อาการหนักขึ้น การขอความช่วยเหลือเร็วช่วยชีวิตได้"
+            )
+        else:
+            return (
+                "⚠️ น้องใจดีกังวลเกี่ยวกับสิ่งที่คุณบอก\n\n"
+                "กรุณาติดต่อผู้เชี่ยวชาญ:\n"
+                "📞 สายด่วนสุขภาพจิต: 1323\n"
+                "📞 สายด่วนยาเสพติด: 1165\n\n"
+                "คุณไม่จำเป็นต้องเผชิญกับสิ่งนี้เพียงลำพัง"
+            )
+
     # คำตอบทั่วไป
     return (
         "ขออภัยครับ ระบบกำลังประสบปัญหาชั่วคราว\n\n"
@@ -1577,9 +1625,7 @@ def process_conversation_data_safely(user_id: str, user_message: str, bot_respon
         try:
             message_token_count = token_counter.count_tokens(user_message + bot_response)
             risk_level, keywords = assess_risk(user_message)
-            is_important = is_important_message(user_message, bot_response)
-            if risk_level == GENERAL_RISK_LEVEL:
-                is_important = False
+            is_important = is_important_message(user_message, bot_response, risk_level=risk_level)
 
             db.save_conversation(
                 user_id=user_id,

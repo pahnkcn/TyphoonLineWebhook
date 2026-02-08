@@ -725,8 +725,6 @@ GENERATION_CONFIG = {
     "temperature": 0.8,
     "max_tokens": 1500,  # ลดจาก 8000 → ข้อความ 2-4 ประโยค ไม่ต้องการมาก
     "top_p": 0.9,
-    "presence_penalty": 0.5,  # เพิ่มจาก 0.4 → ลดการพูดซ้ำมากขึ้น
-    "frequency_penalty": 0.3,
 }
 
 # สำหรับสถานการณ์วิกฤต/ฉุกเฉิน
@@ -734,8 +732,6 @@ CRISIS_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 2000,  # ลดจาก 6000 → ข้อความวิกฤตต้องกระชับ ชัดเจน
     "top_p": 0.5,
-    "presence_penalty": 0.2,
-    "frequency_penalty": 0.2,  # เพิ่ม → ลดการพูดซ้ำ
 }
 
 # สำหรับการให้ข้อมูลเกี่ยวกับสารเสพติด/การรักษา
@@ -743,8 +739,6 @@ INFO_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 3000,  # ลดจาก 6000 → ข้อมูลอาจยาวกว่าปกติ แต่ไม่ต้อง 6000
     "top_p": 0.7,
-    "presence_penalty": 0.2,
-    "frequency_penalty": 0.2,  # เพิ่ม → ลดการพูดซ้ำ
 }
 
 # คอนฟิกการสร้างข้อความสรุป
@@ -752,7 +746,6 @@ SUMMARY_GENERATION_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 4000,  # ลดจาก 16000 → สรุปควรกระชับ
     "top_p": 0.5,
-    "presence_penalty": 0.3,
 }
 
 # ค่า token threshold สำหรับจัดการประวัติการสนทนา
