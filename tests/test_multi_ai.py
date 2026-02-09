@@ -697,7 +697,7 @@ class TestTokenTracking:
                                  prompt_tokens=120, completion_tokens=60, total_tokens=180),
             ]
 
-        def mock_cross_eval(user_msg, responses, registry):
+        def mock_cross_eval(user_msg, responses, registry, system_context=""):
             return [
                 EvaluationResult("provA", {"provB": 80.0}),
                 EvaluationResult("provB", {"provA": 90.0}),

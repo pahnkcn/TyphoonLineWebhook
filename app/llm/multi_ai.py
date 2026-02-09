@@ -36,6 +36,8 @@ _MULTI_AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 EVALUATION_PROMPT = """ให้คะแนน 0-100 สำหรับทุกคำตอบต่อไปนี้ คุณต้องให้คะแนนครบทุกคำตอบ ห้ามข้าม
 เกณฑ์: ความถูกต้อง, ความเป็นธรรมชาติ, ความเห็นอกเห็นใจ, MI technique, ความกระชับ
 
+บทบาทของแชทบอท: \"\"\"{system_context}\"\"\"
+
 คำถามผู้ใช้: \"\"\"{user_message}\"\"\"
 
 {responses_section}
@@ -227,6 +229,7 @@ def _build_evaluation_prompt(
     user_message: str,
     responses: Dict[str, str],
     exclude_provider: str,
+    system_context: str = "",
 ) -> str:
     """Build the evaluation prompt for a single evaluator."""
     # Assign letter labels (A, B, C, ...) to providers to evaluate
@@ -251,6 +254,7 @@ def _build_evaluation_prompt(
     )
 
     prompt = EVALUATION_PROMPT.format(
+        system_context=system_context,
         user_message=user_message,
         responses_section=responses_section,
         expected_json=expected_json,
@@ -308,12 +312,14 @@ def _evaluate_single(
     evaluator: AIProvider,
     user_message: str,
     responses: Dict[str, str],
+    system_context: str = "",
 ) -> EvaluationResult:
     """Have a single provider evaluate all other providers' responses."""
     start = time.time()
     try:
         prompt, labels = _build_evaluation_prompt(
-            user_message, responses, exclude_provider=evaluator.name
+            user_message, responses, exclude_provider=evaluator.name,
+            system_context=system_context,
         )
 
         if not labels:
@@ -411,6 +417,7 @@ def cross_evaluate(
     user_message: str,
     responses: Dict[str, str],
     registry: Optional[ProviderRegistry] = None,
+    system_context: str = "",
 ) -> List[EvaluationResult]:
     """Have each provider evaluate all other providers' responses in parallel.
 
@@ -436,7 +443,7 @@ def cross_evaluate(
     futures = {}
     for evaluator in evaluators:
         future = _MULTI_AI_EXECUTOR.submit(
-            _evaluate_single, registry, evaluator, user_message, responses
+            _evaluate_single, registry, evaluator, user_message, responses, system_context
         )
         futures[future] = evaluator.name
 
@@ -533,7 +540,13 @@ def multi_ai_chat(
 
     total_start = time.time()
 
-    # Extract latest user message for evaluation prompt
+    # Extract system context and latest user message for evaluation prompt
+    system_context = ""
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_context = msg.get("content", "")
+            break
+
     user_message = ""
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -596,7 +609,7 @@ def multi_ai_chat(
 
     # Phase 2: Cross-Evaluation
     eval_start = time.time()
-    evaluations = cross_evaluate(user_message, successful_responses, registry)
+    evaluations = cross_evaluate(user_message, successful_responses, registry, system_context)
     eval_elapsed = (time.time() - eval_start) * 1000
 
     for e in evaluations:
