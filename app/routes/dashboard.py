@@ -421,6 +421,229 @@ def get_dashboard_user_history(user_id: str):
         }), 500
 
 
+@dashboard_bp.route('/api/dashboard/multi-ai-stats', methods=['GET'])
+def get_multi_ai_stats():
+    """Return aggregated Multi-AI Consensus statistics for dashboard visualization."""
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
+    lookback_days = max(1, min(lookback_days, 180))
+    cutoff = datetime.now() - timedelta(days=lookback_days)
+
+    try:
+        # --- Summary ---
+        summary_row = _db_manager.execute_query(
+            '''SELECT COUNT(*) AS cnt,
+                      AVG(total_time_ms) AS avg_time,
+                      AVG(best_score) AS avg_score
+               FROM multi_ai_logs WHERE timestamp >= %s''',
+            (cutoff,),
+        )
+        total_evals = int(summary_row[0][0]) if summary_row and summary_row[0][0] else 0
+        avg_total_time = float(summary_row[0][1]) if summary_row and summary_row[0][1] else 0.0
+        avg_best_score = float(summary_row[0][2]) if summary_row and summary_row[0][2] else 0.0
+
+        if total_evals == 0:
+            return jsonify({
+                'generated_at': datetime.now().isoformat(),
+                'lookback_days': lookback_days,
+                'summary': {'total_evaluations': 0, 'avg_total_time_ms': 0, 'avg_best_score': 0},
+                'provider_wins': [],
+                'provider_avg_scores': [],
+                'provider_tokens': [],
+                'provider_response_times': [],
+                'daily_trend': [],
+            })
+
+        # --- Provider wins (best_provider frequency) ---
+        wins_rows = _db_manager.execute_query(
+            '''SELECT best_provider, COUNT(*) AS wins
+               FROM multi_ai_logs WHERE timestamp >= %s
+               GROUP BY best_provider ORDER BY wins DESC''',
+            (cutoff,),
+        ) or []
+        provider_wins = []
+        for row in wins_rows:
+            provider_wins.append({
+                'provider': row[0],
+                'wins': int(row[1]),
+                'pct': round(int(row[1]) / total_evals, 3) if total_evals else 0,
+            })
+
+        # --- Provider avg scores (from all_scores JSON) ---
+        all_logs = _db_manager.execute_query(
+            '''SELECT all_scores, token_usage, generation_time_ms, evaluation_time_ms, provider_times
+               FROM multi_ai_logs WHERE timestamp >= %s''',
+            (cutoff,),
+        ) or []
+
+        score_accum: Dict[str, List[float]] = {}
+        token_accum: Dict[str, Dict[str, int]] = {}
+        gen_time_accum: Dict[str, List[float]] = {}
+        eval_time_accum: Dict[str, List[float]] = {}
+
+        for row in all_logs:
+            # Parse all_scores
+            try:
+                scores = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except (json.JSONDecodeError, TypeError):
+                scores = {}
+            for provider, score in scores.items():
+                score_accum.setdefault(provider, []).append(float(score))
+
+            # Parse token_usage
+            try:
+                tokens = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+            except (json.JSONDecodeError, TypeError):
+                tokens = {}
+            for provider, usage in tokens.items():
+                if provider not in token_accum:
+                    token_accum[provider] = {'prompt': 0, 'completion': 0, 'total': 0}
+                if isinstance(usage, dict):
+                    token_accum[provider]['prompt'] += int(usage.get('prompt', 0))
+                    token_accum[provider]['completion'] += int(usage.get('completion', 0))
+                    token_accum[provider]['total'] += int(usage.get('total', 0))
+
+            # Parse provider_times
+            try:
+                ptimes = json.loads(row[4]) if isinstance(row[4], str) else (row[4] or {})
+            except (json.JSONDecodeError, TypeError):
+                ptimes = {}
+            for provider, t in ptimes.items():
+                if isinstance(t, dict):
+                    gen_ms = float(t.get('gen_ms', 0))
+                    eval_ms = float(t.get('eval_ms', 0))
+                    if gen_ms > 0:
+                        gen_time_accum.setdefault(provider, []).append(gen_ms)
+                    if eval_ms > 0:
+                        eval_time_accum.setdefault(provider, []).append(eval_ms)
+
+        provider_avg_scores = []
+        for provider, scores_list in sorted(score_accum.items(), key=lambda x: -(sum(x[1]) / len(x[1]))):
+            provider_avg_scores.append({
+                'provider': provider,
+                'avg_score': round(sum(scores_list) / len(scores_list), 1),
+                'evaluations': len(scores_list),
+            })
+
+        provider_tokens = []
+        for provider, usage in sorted(token_accum.items(), key=lambda x: -x[1]['total']):
+            provider_tokens.append({
+                'provider': provider,
+                'total_prompt': usage['prompt'],
+                'total_completion': usage['completion'],
+                'total_tokens': usage['total'],
+            })
+
+        # --- Per-model average gen/eval times ---
+        all_providers_set = set(gen_time_accum.keys()) | set(eval_time_accum.keys())
+        provider_avg_times = []
+        for provider in sorted(all_providers_set):
+            gen_list = gen_time_accum.get(provider, [])
+            eval_list = eval_time_accum.get(provider, [])
+            provider_avg_times.append({
+                'provider': provider,
+                'avg_gen_ms': round(sum(gen_list) / len(gen_list), 0) if gen_list else 0,
+                'avg_eval_ms': round(sum(eval_list) / len(eval_list), 0) if eval_list else 0,
+                'gen_count': len(gen_list),
+                'eval_count': len(eval_list),
+            })
+        provider_avg_times.sort(key=lambda x: -(x['avg_gen_ms'] + x['avg_eval_ms']))
+
+        # --- Phase-level aggregate response times (kept for stat cards) ---
+        avg_gen_time = 0.0
+        avg_eval_time = 0.0
+        gen_times = [float(r[2]) for r in all_logs if r[2] is not None]
+        eval_times = [float(r[3]) for r in all_logs if r[3] is not None]
+        if gen_times:
+            avg_gen_time = sum(gen_times) / len(gen_times)
+        if eval_times:
+            avg_eval_time = sum(eval_times) / len(eval_times)
+
+        provider_response_times = [{
+            'phase': 'generation',
+            'avg_ms': round(avg_gen_time, 0),
+            'count': len(gen_times),
+        }, {
+            'phase': 'evaluation',
+            'avg_ms': round(avg_eval_time, 0),
+            'count': len(eval_times),
+        }]
+
+        # --- Daily trend ---
+        trend_rows = _db_manager.execute_query(
+            '''SELECT DATE(timestamp) AS d, COUNT(*) AS cnt,
+                      AVG(best_score) AS avg_sc, best_provider
+               FROM multi_ai_logs WHERE timestamp >= %s
+               GROUP BY d, best_provider ORDER BY d ASC''',
+            (cutoff,),
+        ) or []
+
+        daily_map: Dict[str, Dict[str, Any]] = {}
+        for row in trend_rows:
+            day = row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
+            if day not in daily_map:
+                daily_map[day] = {'date': day, 'evaluations': 0, 'avg_score': 0.0, 'score_sum': 0.0, 'best_provider_counts': {}}
+            daily_map[day]['evaluations'] += int(row[1])
+            daily_map[day]['score_sum'] += float(row[2] or 0) * int(row[1])
+            daily_map[day]['best_provider_counts'][row[3]] = int(row[1])
+
+        daily_trend = []
+        for day_data in sorted(daily_map.values(), key=lambda x: x['date']):
+            total = day_data['evaluations']
+            daily_trend.append({
+                'date': day_data['date'],
+                'evaluations': total,
+                'avg_score': round(day_data['score_sum'] / total, 1) if total else 0,
+                'best_provider_counts': day_data['best_provider_counts'],
+            })
+
+        # --- Per-request processing times (recent, for timeline chart) ---
+        time_rows = _db_manager.execute_query(
+            '''SELECT timestamp, generation_time_ms, evaluation_time_ms,
+                      total_time_ms, best_provider
+               FROM multi_ai_logs WHERE timestamp >= %s
+               ORDER BY timestamp ASC LIMIT 200''',
+            (cutoff,),
+        ) or []
+        processing_times = []
+        for row in time_rows:
+            ts = row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
+            processing_times.append({
+                'timestamp': ts,
+                'gen_ms': round(float(row[1]), 0) if row[1] is not None else 0,
+                'eval_ms': round(float(row[2]), 0) if row[2] is not None else 0,
+                'total_ms': round(float(row[3]), 0) if row[3] is not None else 0,
+                'best_provider': row[4],
+            })
+
+        return jsonify({
+            'generated_at': datetime.now().isoformat(),
+            'lookback_days': lookback_days,
+            'summary': {
+                'total_evaluations': total_evals,
+                'avg_total_time_ms': round(avg_total_time, 0),
+                'avg_best_score': round(avg_best_score, 1),
+            },
+            'provider_wins': provider_wins,
+            'provider_avg_scores': provider_avg_scores,
+            'provider_tokens': provider_tokens,
+            'provider_response_times': provider_response_times,
+            'provider_avg_times': provider_avg_times,
+            'daily_trend': daily_trend,
+            'processing_times': processing_times,
+        })
+
+    except Exception as exc:
+        logging.error('Error generating multi-AI stats: %s', exc, exc_info=True)
+        return jsonify({
+            'error': 'multi_ai_stats_failed',
+            'message': 'Multi-AI statistics are unavailable at the moment.',
+        }), 500
+
+
 def _anonymize_user_id(user_id: str, salt: str = '') -> str:
     """Hash a user ID for anonymized research export."""
     return hashlib.sha256(f"{salt}{user_id}".encode()).hexdigest()[:12]

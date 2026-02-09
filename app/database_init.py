@@ -55,6 +55,12 @@ class DatabaseInitializer:
                 self._create_registration_codes_table()
                 logging.info("สร้างตาราง registration_codes สำเร็จ")
 
+            # ตรวจสอบและสร้างตาราง multi_ai_logs
+            if not self.db.table_exists('multi_ai_logs'):
+                logging.info("ไม่พบตาราง multi_ai_logs กำลังสร้าง...")
+                self._create_multi_ai_logs_table()
+                logging.info("สร้างตาราง multi_ai_logs สำเร็จ")
+
             logging.info("การเริ่มต้นฐานข้อมูลสำเร็จ")
             return True
 
@@ -127,6 +133,29 @@ class DatabaseInitializer:
                 form_data JSON,
                 INDEX idx_user_id (user_id),
                 INDEX idx_status (status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        """
+        self.db.execute_and_commit(query)
+
+    def _create_multi_ai_logs_table(self) -> None:
+        """สร้างตาราง multi_ai_logs สำหรับเก็บผลลัพธ์ Multi-AI Consensus"""
+        query = """
+            CREATE TABLE multi_ai_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(50) NOT NULL,
+                timestamp DATETIME NOT NULL,
+                best_provider VARCHAR(100) NOT NULL,
+                best_score FLOAT,
+                all_scores JSON,
+                providers_used INT NOT NULL,
+                generation_time_ms FLOAT,
+                evaluation_time_ms FLOAT,
+                total_time_ms FLOAT,
+                token_usage JSON,
+                provider_times JSON,
+                INDEX idx_mai_timestamp (timestamp),
+                INDEX idx_mai_user_id (user_id),
+                INDEX idx_mai_best_provider (best_provider)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """
         self.db.execute_and_commit(query)

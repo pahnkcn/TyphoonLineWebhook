@@ -214,7 +214,7 @@ function tickColor(){return isDark()?'#94a3b8':'#64748b'}
 function labelColor(){return isDark()?'#cbd5e1':'#475569'}
 
 /* ===== TAB DEFINITIONS ===== */
-const TAB_KEYS=['trend','risk_trend','risk_dist','engagement','retention','depth','keywords'];
+const TAB_KEYS=['trend','risk_trend','risk_dist','engagement','retention','depth','keywords','multi_ai'];
 const TAB_LABELS={
   trend:'แนวโน้มข้อความ',
   risk_trend:'พัฒนาการความเสี่ยง',
@@ -222,7 +222,8 @@ const TAB_LABELS={
   engagement:'การมีส่วนร่วม',
   retention:'Retention',
   depth:'ความลึกบทสนทนา',
-  keywords:'คีย์เวิร์ดเด่น'
+  keywords:'คีย์เวิร์ดเด่น',
+  multi_ai:'Multi-AI Consensus'
 };
 const TAB_DESC={
   trend:'แสดงปริมาณข้อความรายวันและสัดส่วนข้อความสำคัญ เพื่อติดตามระดับการมีส่วนร่วมของผู้ใช้กับแชทบอทตลอดช่วงเวลา',
@@ -231,7 +232,8 @@ const TAB_DESC={
   engagement:'การกระจายตัวของผู้รับบริการตามระดับการดูแล และตัวชี้วัดการมีส่วนร่วมหลัก',
   retention:'จำนวนผู้ใช้จำแนกตามจำนวนข้อความที่ส่ง ช่วยวัดว่าผู้ใช้กลับมาใช้บริการซ้ำมากน้อยเพียงใด ยิ่งผู้ใช้กลับมามาก ยิ่งแสดงว่าแชทบอทมีประโยชน์',
   depth:'แนวโน้มความลึกของบทสนทนา วัดจากจำนวนข้อความเฉลี่ยต่อผู้ใช้และโทเคนเฉลี่ยต่อข้อความ หากค่าเพิ่มขึ้นแสดงว่าผู้ใช้เปิดเผยและสนทนาอย่างลึกซึ้งมากขึ้น',
-  keywords:'คีย์เวิร์ดที่ถูกพูดถึงบ่อยที่สุดในบทสนทนา จำแนกตามระดับความเสี่ยง ช่วยระบุประเด็นหลักที่ผู้ใช้กำลังเผชิญ'
+  keywords:'คีย์เวิร์ดที่ถูกพูดถึงบ่อยที่สุดในบทสนทนา จำแนกตามระดับความเสี่ยง ช่วยระบุประเด็นหลักที่ผู้ใช้กำลังเผชิญ',
+  multi_ai:'เปรียบเทียบประสิทธิภาพโมเดล AI — จำนวนการถูกเลือก (wins), คะแนนเฉลี่ย, โทเคนที่ใช้ และเวลาตอบ เพื่อเลือกโมเดลที่เหมาะสมที่สุด'
 };
 
 /* ===== CHART COMPONENTS ===== */
@@ -398,8 +400,111 @@ function VizKeywords({keywords}){
   return html`<div className="keyword-grid">${items.map(item=>html`<span key=${item.keyword} className=${'kw r-'+(item.risk_level||'contextual')}><span className="kw-term">${item.keyword}</span><span className="kw-meta">${riskMeta[item.risk_level]?.label||'บริบท'} • ${fmtN(item.count)}</span></span>`)}</div>`;
 }
 
+/* ===== MULTI-AI CONSENSUS CHART ===== */
+function ChartMultiAI({multiAiStats}){
+  const winsRef=useRef(null),winsChart=useRef(null);
+  const scoresRef=useRef(null),scoresChart=useRef(null);
+  const tokensRef=useRef(null),tokensChart=useRef(null);
+  const ptRef=useRef(null),ptChart=useRef(null);
+
+  const stats=multiAiStats||{};
+  const summary=stats.summary||{};
+  const wins=stats.provider_wins||[];
+  const avgScores=stats.provider_avg_scores||[];
+  const tokens=stats.provider_tokens||[];
+  const times=stats.provider_response_times||[];
+  const providerTimes=stats.provider_avg_times||[];
+  const hasData=summary.total_evaluations>0;
+
+  const COLORS=['#6366f1','#0ea5e9','#22c55e','#f97316','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+
+  useEffect(()=>{
+    if(!winsRef.current||!window.Chart||!wins.length)return;
+    if(winsChart.current)winsChart.current.destroy();
+    winsChart.current=new Chart(winsRef.current.getContext('2d'),{
+      type:'doughnut',
+      data:{labels:wins.map(w=>w.provider),datasets:[{data:wins.map(w=>w.wins),backgroundColor:wins.map((_,i)=>COLORS[i%COLORS.length]),borderWidth:0,hoverOffset:14}]},
+      options:{responsive:true,maintainAspectRatio:false,cutout:'55%',plugins:{legend:{position:'bottom',labels:{usePointStyle:true,color:labelColor(),padding:12}},tooltip:{...tipStyle(),callbacks:{label(ctx){const w=wins[ctx.dataIndex];return w.provider+': '+w.wins+' wins ('+fmtP(w.pct)+')';}}}}}
+    });
+    return()=>{if(winsChart.current)winsChart.current.destroy()};
+  },[wins]);
+
+  useEffect(()=>{
+    if(!scoresRef.current||!window.Chart||!avgScores.length)return;
+    if(scoresChart.current)scoresChart.current.destroy();
+    scoresChart.current=new Chart(scoresRef.current.getContext('2d'),{
+      type:'bar',
+      data:{labels:avgScores.map(s=>s.provider),datasets:[{label:'คะแนนเฉลี่ย',data:avgScores.map(s=>s.avg_score),backgroundColor:avgScores.map((_,i)=>COLORS[i%COLORS.length]),borderRadius:8,borderSkipped:false}]},
+      options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',scales:{x:{beginAtZero:true,max:100,ticks:{color:tickColor()},grid:{color:gridColor()},title:{display:true,text:'คะแนน (0-100)',color:labelColor()}},y:{ticks:{color:tickColor()},grid:{display:false}}},plugins:{legend:{display:false},tooltip:{...tipStyle(),callbacks:{label(ctx){const s=avgScores[ctx.dataIndex];return s.provider+': '+s.avg_score+' ('+s.evaluations+' evals)'}}}}}
+    });
+    return()=>{if(scoresChart.current)scoresChart.current.destroy()};
+  },[avgScores]);
+
+  useEffect(()=>{
+    if(!tokensRef.current||!window.Chart||!tokens.length)return;
+    if(tokensChart.current)tokensChart.current.destroy();
+    tokensChart.current=new Chart(tokensRef.current.getContext('2d'),{
+      type:'bar',
+      data:{labels:tokens.map(t=>t.provider),datasets:[
+        {label:'Prompt Tokens',data:tokens.map(t=>t.total_prompt),backgroundColor:'rgba(99,102,241,.7)',borderRadius:4},
+        {label:'Completion Tokens',data:tokens.map(t=>t.total_completion),backgroundColor:'rgba(14,165,233,.7)',borderRadius:4}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,ticks:{color:tickColor()},grid:{display:false}},y:{stacked:true,beginAtZero:true,ticks:{color:tickColor()},grid:{color:gridColor()},title:{display:true,text:'จำนวนโทเคน',color:labelColor()}}},plugins:{legend:{display:true,labels:{usePointStyle:true,color:labelColor()}},tooltip:{...tipStyle(),mode:'index'}}}
+    });
+    return()=>{if(tokensChart.current)tokensChart.current.destroy()};
+  },[tokens]);
+
+  useEffect(()=>{
+    if(!ptRef.current||!window.Chart||!providerTimes.length)return;
+    if(ptChart.current)ptChart.current.destroy();
+    ptChart.current=new Chart(ptRef.current.getContext('2d'),{
+      type:'bar',
+      data:{labels:providerTimes.map(p=>p.provider),datasets:[
+        {label:'Generation',data:providerTimes.map(p=>p.avg_gen_ms/1000),backgroundColor:'rgba(99,102,241,.75)',borderRadius:6,borderSkipped:false},
+        {label:'Evaluation',data:providerTimes.map(p=>p.avg_eval_ms/1000),backgroundColor:'rgba(14,165,233,.75)',borderRadius:6,borderSkipped:false}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,scales:{x:{ticks:{color:tickColor()},grid:{display:false}},y:{beginAtZero:true,ticks:{color:tickColor(),callback:v=>v+'s'},grid:{color:gridColor()},title:{display:true,text:'เวลาเฉลี่ย (วินาที)',color:labelColor()}}},plugins:{legend:{display:true,labels:{usePointStyle:true,color:labelColor()}},tooltip:{...tipStyle(),mode:'index',callbacks:{afterBody(items){const i=items[0].dataIndex;const p=providerTimes[i];return'รวม: '+((p.avg_gen_ms+p.avg_eval_ms)/1000).toFixed(1)+'s (จาก '+p.gen_count+' gen, '+p.eval_count+' eval)'},label(ctx){return ctx.dataset.label+': '+(ctx.raw).toFixed(1)+'s'}}}}}
+    });
+    return()=>{if(ptChart.current)ptChart.current.destroy()};
+  },[providerTimes]);
+
+  if(!hasData)return html`<div className="empty">ยังไม่มีข้อมูล Multi-AI Consensus — เปิดใช้งาน MULTI_AI_ENABLED=true เพื่อเริ่มเก็บสถิติ</div>`;
+
+  const genTime=times.find(t=>t.phase==='generation');
+  const evalTime=times.find(t=>t.phase==='evaluation');
+
+  return html`<div>
+    <div className="viz-metrics">
+      <div className="vm"><span>การประเมินทั้งหมด</span><strong>${fmtN(summary.total_evaluations)}</strong></div>
+      <div className="vm"><span>เวลาเฉลี่ยรวม</span><strong>${fmtD(summary.avg_total_time_ms/1000,1)}s</strong></div>
+      <div className="vm"><span>คะแนนเฉลี่ย</span><strong>${fmtD(summary.avg_best_score,1)}</strong></div>
+      <div className="vm"><span>เวลา Generate</span><strong>${genTime?fmtD(genTime.avg_ms/1000,1)+'s':'--'}</strong></div>
+      <div className="vm"><span>เวลา Evaluate</span><strong>${evalTime?fmtD(evalTime.avg_ms/1000,1)+'s':'--'}</strong></div>
+      <div className="vm"><span>โมเดลที่ดีที่สุด</span><strong>${wins.length?wins[0].provider:'--'}</strong></div>
+    </div>
+    <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px',marginTop:'16px'}}>
+      <div>
+        <p style=${{fontSize:'.85rem',fontWeight:600,marginBottom:'8px',color:'var(--text-muted)'}}>โมเดลที่ถูกเลือก (Wins)</p>
+        <div className="viz-canvas" style=${{height:'280px'}}><canvas ref=${winsRef} /></div>
+      </div>
+      <div>
+        <p style=${{fontSize:'.85rem',fontWeight:600,marginBottom:'8px',color:'var(--text-muted)'}}>คะแนนเฉลี่ยแต่ละโมเดล</p>
+        <div className="viz-canvas" style=${{height:'280px'}}><canvas ref=${scoresRef} /></div>
+      </div>
+    </div>
+    <div style=${{marginTop:'20px'}}>
+      <p style=${{fontSize:'.85rem',fontWeight:600,marginBottom:'8px',color:'var(--text-muted)'}}>Token Usage แต่ละโมเดล (Prompt + Completion)</p>
+      <div className="viz-canvas" style=${{height:'300px'}}><canvas ref=${tokensRef} /></div>
+    </div>
+    <div style=${{marginTop:'20px'}}>
+      <p style=${{fontSize:'.85rem',fontWeight:600,marginBottom:'8px',color:'var(--text-muted)'}}>เวลาเฉลี่ยแต่ละโมเดล (Generation vs Evaluation)</p>
+      <div className="viz-canvas" style=${{height:'300px'}}><canvas ref=${ptRef} /></div>
+    </div>
+  </div>`;
+}
+
 /* ===== VISUALIZATION PANEL (single large viz with tabs) ===== */
-function VizPanel({activeTab,onTabChange,insights}){
+function VizPanel({activeTab,onTabChange,insights,multiAiStats}){
   const inf=insights?.infographic||{};
   const renderViz=()=>{
     switch(activeTab){
@@ -410,6 +515,7 @@ function VizPanel({activeTab,onTabChange,insights}){
       case'retention':return html`<${ChartRetention} buckets=${insights?.retention_buckets||[]} />`;
       case'depth':return html`<${ChartDepth} entries=${insights?.conversation_depth||[]} />`;
       case'keywords':return html`<${VizKeywords} keywords=${insights?.top_keywords||[]} />`;
+      case'multi_ai':return html`<${ChartMultiAI} multiAiStats=${multiAiStats} />`;
       default:return null;
     }
   };
@@ -482,9 +588,15 @@ function App(){
   const[search,setSearch]=useState('');
   const[tab,setTab]=useState('trend');
   const[theme,setTheme]=useState(()=>localStorage.getItem('dashboard-theme')||'light');
+  const[multiAiStats,setMultiAiStats]=useState(null);
 
   useEffect(()=>{document.documentElement.setAttribute('data-theme',theme);localStorage.setItem('dashboard-theme',theme)},[theme]);
   useEffect(()=>{const t=setInterval(()=>setRi(i=>i+1),60000);return()=>clearInterval(t)},[]);
+
+  useEffect(()=>{if(tab!=='multi_ai')return;let a=true;
+    (async()=>{try{const q=new URLSearchParams({lookback_days:params.lookbackDays});const r=await fetch('/api/dashboard/multi-ai-stats?'+q);if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();if(a)setMultiAiStats(d)}catch(e){console.error('[multi-ai-stats]',e)}})();
+    return()=>{a=false};
+  },[tab,params.lookbackDays,ri]);
 
   useEffect(()=>{let a=true;setLoading(true);setError(null);
     (async()=>{try{const q=new URLSearchParams({limit:params.userLimit,lookback_days:params.lookbackDays,keyword_limit:params.keywordLimit});const r=await fetch('/api/dashboard/insights?'+q);if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();if(a)setInsights(d)}catch(e){console.error(e);if(a)setError('ไม่สามารถดึงข้อมูลได้')}finally{if(a)setLoading(false)}})();
@@ -549,7 +661,7 @@ function App(){
         </section>
 
         <!-- Single Visualization with Tabs -->
-        <${VizPanel} activeTab=${tab} onTabChange=${setTab} insights=${insights} />
+        <${VizPanel} activeTab=${tab} onTabChange=${setTab} insights=${insights} multiAiStats=${multiAiStats} />
 
         <!-- User Table -->
         <${UserTable} users=${insights?.users||[]} onInspect=${setSelUser} searchQuery=${search} onSearchChange=${setSearch} />
