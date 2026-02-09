@@ -175,6 +175,7 @@ def generate_all(
     registry: Optional[ProviderRegistry] = None,
     temperature: float = 0.7,
     max_tokens: int = 1024,
+    timeout: float = GENERATION_TIMEOUT,
 ) -> List[ProviderResponse]:
     """Send messages to all active providers in parallel.
 
@@ -198,7 +199,7 @@ def generate_all(
 
     results: List[ProviderResponse] = []
     done, not_done = concurrent.futures.wait(
-        futures.keys(), timeout=GENERATION_TIMEOUT + 5
+        futures.keys(), timeout=timeout + 5
     )
 
     for future in done:
@@ -218,7 +219,7 @@ def generate_all(
         future.cancel()
         logger.warning(f"[multi-ai] {name} timed out")
         results.append(ProviderResponse(
-            provider_name=name, content="", response_time_ms=GENERATION_TIMEOUT * 1000,
+            provider_name=name, content="", response_time_ms=timeout * 1000,
             success=False, error="Timeout",
         ))
 
@@ -418,6 +419,7 @@ def cross_evaluate(
     responses: Dict[str, str],
     registry: Optional[ProviderRegistry] = None,
     system_context: str = "",
+    timeout: float = EVALUATION_TIMEOUT,
 ) -> List[EvaluationResult]:
     """Have each provider evaluate all other providers' responses in parallel.
 
@@ -449,7 +451,7 @@ def cross_evaluate(
 
     results: List[EvaluationResult] = []
     done, not_done = concurrent.futures.wait(
-        futures.keys(), timeout=EVALUATION_TIMEOUT + 5
+        futures.keys(), timeout=timeout + 5
     )
 
     for future in done:
@@ -520,6 +522,7 @@ def multi_ai_chat(
     registry: Optional[ProviderRegistry] = None,
     temperature: float = 0.7,
     max_tokens: int = 1024,
+    timeout: float = 0,
 ) -> ConsensusResult:
     """Main orchestrator: generate → evaluate → select best response.
 
@@ -528,6 +531,7 @@ def multi_ai_chat(
         registry: Optional ProviderRegistry (uses global if not provided).
         temperature: Generation temperature.
         max_tokens: Max tokens for generation.
+        timeout: Overall time budget in seconds. 0 = use default constants.
 
     Returns:
         ConsensusResult with the best response and metadata.
@@ -539,6 +543,14 @@ def multi_ai_chat(
         registry = get_registry()
 
     total_start = time.time()
+
+    # Derive per-phase timeouts from overall budget
+    if timeout > 0:
+        gen_timeout = timeout * 0.45
+        eval_timeout = timeout * 0.45
+    else:
+        gen_timeout = GENERATION_TIMEOUT
+        eval_timeout = EVALUATION_TIMEOUT
 
     # Extract system context and latest user message for evaluation prompt
     system_context = ""
@@ -555,7 +567,7 @@ def multi_ai_chat(
 
     # Phase 1: Parallel Generation
     gen_start = time.time()
-    gen_results = generate_all(messages, registry, temperature, max_tokens)
+    gen_results = generate_all(messages, registry, temperature, max_tokens, timeout=gen_timeout)
     gen_elapsed = (time.time() - gen_start) * 1000
 
     successful_responses: Dict[str, str] = {}
@@ -612,7 +624,7 @@ def multi_ai_chat(
 
     # Phase 2: Cross-Evaluation
     eval_start = time.time()
-    evaluations = cross_evaluate(user_message, successful_responses, registry, system_context)
+    evaluations = cross_evaluate(user_message, successful_responses, registry, system_context, timeout=eval_timeout)
     eval_elapsed = (time.time() - eval_start) * 1000
 
     for e in evaluations:

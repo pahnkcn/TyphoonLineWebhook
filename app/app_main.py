@@ -1408,6 +1408,19 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
 
     effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
 
+    # เลือก config: ถ้า risk_level == 'high' ใช้ CRISIS_CONFIG โดยตรง (ไม่ต้อง keyword match ซ้ำ)
+    if risk_level == 'high':
+        logging.info("Using CRISIS_CONFIG based on assess_risk result")
+        dynamic_config = CRISIS_CONFIG
+    else:
+        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
+        user_message = ""
+        for msg in reversed(filtered_messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+        dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
     # --- Multi-AI Consensus Mode ---
     if getattr(config, 'MULTI_AI_ENABLED', False):
         try:
@@ -1417,8 +1430,9 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
                 consensus = multi_ai_chat(
                     messages=api_messages,
                     registry=registry,
-                    temperature=0.7,
-                    max_tokens=1024,
+                    temperature=dynamic_config.get("temperature", 0.7),
+                    max_tokens=dynamic_config.get("max_tokens", 1024),
+                    timeout=effective_timeout,
                 )
                 logging.info(
                     f"[multi-ai] Result: best={consensus.best_provider} "
@@ -1438,18 +1452,6 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
             logging.error(f"[multi-ai] Unexpected error, falling back to Grok: {e}")
 
     # --- Single-provider mode (Grok) ---
-    # เลือก config: ถ้า risk_level == 'high' ใช้ CRISIS_CONFIG โดยตรง (ไม่ต้อง keyword match ซ้ำ)
-    if risk_level == 'high':
-        logging.info("Using CRISIS_CONFIG based on assess_risk result")
-        dynamic_config = CRISIS_CONFIG
-    else:
-        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
-        user_message = ""
-        for msg in reversed(filtered_messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-        dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
     def _call() -> str:
         return _xai_circuit_breaker.call(

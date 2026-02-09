@@ -689,7 +689,7 @@ class TestTokenTracking:
 
     def test_multi_ai_chat_includes_token_usage(self):
         """multi_ai_chat should aggregate token usage from generation results."""
-        def mock_gen_all(messages, registry, temperature, max_tokens):
+        def mock_gen_all(messages, registry, temperature, max_tokens, timeout=60):
             return [
                 ProviderResponse("provA", "Response A", 500, True, "",
                                  prompt_tokens=100, completion_tokens=50, total_tokens=150),
@@ -697,7 +697,7 @@ class TestTokenTracking:
                                  prompt_tokens=120, completion_tokens=60, total_tokens=180),
             ]
 
-        def mock_cross_eval(user_msg, responses, registry, system_context=""):
+        def mock_cross_eval(user_msg, responses, registry, system_context="", timeout=80):
             return [
                 EvaluationResult("provA", {"provB": 80.0}),
                 EvaluationResult("provB", {"provA": 90.0}),
