@@ -607,6 +607,9 @@ def multi_ai_chat(
             provider_times=provider_times,
         )
 
+    # Cooldown between phases to avoid provider rate limits (e.g. Gemini 429)
+    time.sleep(1.5)
+
     # Phase 2: Cross-Evaluation
     eval_start = time.time()
     evaluations = cross_evaluate(user_message, successful_responses, registry, system_context)

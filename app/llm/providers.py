@@ -20,7 +20,7 @@ _cache_lock = threading.Lock()
 
 # Default timeout and retry settings
 _DEFAULT_TIMEOUT = 60.0
-_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_MAX_RETRIES = 5
 
 # OpenRouter constants
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
