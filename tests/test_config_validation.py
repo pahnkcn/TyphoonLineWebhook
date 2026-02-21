@@ -106,3 +106,31 @@ class TestLoadConfigNumericValidation:
             assert cfg.LINE_CHANNEL_ACCESS_TOKEN == 'tok'
             assert cfg.REDIS_PORT == 6379
             assert cfg.PORT == 5000
+
+
+class TestLoadConfigRagFlag:
+    """Verify RAG_ENABLED parsing and defaults."""
+
+    def test_rag_enabled_defaults_true_when_missing(self):
+        env = {**_BASE_ENV}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop('RAG_ENABLED', None)
+            cfg = load_config()
+            assert cfg.RAG_ENABLED is True
+
+    def test_rag_enabled_parses_false(self):
+        env = {**_BASE_ENV, 'RAG_ENABLED': 'false'}
+        with patch.dict(os.environ, env, clear=False):
+            cfg = load_config()
+            assert cfg.RAG_ENABLED is False
+
+    def test_rag_extended_defaults_are_loaded(self):
+        env = {**_BASE_ENV}
+        with patch.dict(os.environ, env, clear=False):
+            for key in ('RAG_EMBEDDING_DIM', 'RAG_TOP_K', 'RAG_FETCH_K', 'RAG_MAX_CONTEXT_CHARS'):
+                os.environ.pop(key, None)
+            cfg = load_config()
+            assert cfg.RAG_EMBEDDING_DIM == 1536
+            assert cfg.RAG_TOP_K == 5
+            assert cfg.RAG_FETCH_K == 24
+            assert cfg.RAG_MAX_CONTEXT_CHARS == 7000

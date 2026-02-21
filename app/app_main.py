@@ -82,6 +82,7 @@ from .risk_assessment import (
 from .services.admin_alerting import alert_high_risk_user
 from .database_init import initialize_database
 from .database_manager import DatabaseManager
+from .rag import init_knowledge_base
 from .error_handling import (
     ChatbotError,
     ErrorCategory,
@@ -163,6 +164,7 @@ logging.basicConfig(
 
 # โหลดการตั้งค่าและตัวแปรสภาพแวดล้อม
 config = load_config()
+knowledge_base = None
 
 # เริ่มต้นเซอร์วิสภายนอก
 try:
@@ -260,6 +262,29 @@ try:
     from .services.proactive_checkin import init_proactive_checkin
     init_proactive_checkin(db_manager, redis_client, line_bot_api)
 
+    # เริ่มต้นระบบ RAG knowledge base (ไม่ทำให้แอปล้มถ้า init ไม่สำเร็จ)
+    try:
+        knowledge_base = init_knowledge_base(
+            db_manager=db_manager,
+            redis_client=redis_client,
+            docs_dir=os.path.join(BASE_DIR, 'knowledge_docs'),
+            enabled=getattr(config, 'RAG_ENABLED', True),
+            auto_ingest=True,
+            chunk_size=getattr(config, 'RAG_CHUNK_SIZE', 1500),
+            overlap=getattr(config, 'RAG_CHUNK_OVERLAP', 200),
+            min_score=getattr(config, 'RAG_MIN_SCORE', 0.35),
+            embedding_dim=getattr(config, 'RAG_EMBEDDING_DIM', 1536),
+            base_fetch_k=getattr(config, 'RAG_FETCH_K', 24),
+            max_context_chars=getattr(config, 'RAG_MAX_CONTEXT_CHARS', 7000),
+        )
+        if knowledge_base is not None:
+            logging.info("RAG knowledge base initialized: %s", knowledge_base.get_stats())
+        else:
+            logging.info("RAG knowledge base is disabled or unavailable")
+    except Exception as rag_error:
+        knowledge_base = None
+        logging.warning("RAG knowledge base initialization failed: %s", rag_error)
+
 except Exception as e:
     logging.critical(f"เกิดข้อผิดพลาดในการเริ่มต้นแอปพลิเคชัน: {str(e)}")
     raise
@@ -269,7 +294,7 @@ limiter = init_limiter(app)
 
 # Register dashboard Blueprint
 from .routes.dashboard import dashboard_bp, init_dashboard
-init_dashboard(db, db_manager, redis_client, GENERAL_RISK_LEVEL)
+init_dashboard(db, db_manager, redis_client, GENERAL_RISK_LEVEL, knowledge_base=knowledge_base)
 app.register_blueprint(dashboard_bp)
 
 
@@ -1076,6 +1101,8 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
     bot_response = None
     error_occurred = False
     fallback_response = None
+    rag_context = ""
+    rag_sources: List[Dict[str, object]] = []
     
     try:
         # 1. ดึงบริบทผู้ใช้ (ไม่ critical - สามารถทำงานต่อได้แม้ไม่มีบริบท)
@@ -1112,6 +1139,42 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         # 3.5 ประเมินความเสี่ยงล่วงหน้าเพื่อเลือก AI config ที่เหมาะสม
         pre_risk_level, _ = assess_risk(user_message)
+
+        # 3.6 ดึงบริบทความรู้จาก RAG (best-effort)
+        if getattr(config, 'RAG_ENABLED', False) and knowledge_base is not None:
+            try:
+                rag_topic_hint = "crisis" if pre_risk_level == "high" else None
+                rag_payload = knowledge_base.query_with_sources(
+                    user_message,
+                    top_k=getattr(config, 'RAG_TOP_K', 5),
+                    topic_hint=rag_topic_hint,
+                )
+                rag_context = str(rag_payload.get("context") or "")
+                rag_sources = list(rag_payload.get("sources") or [])
+
+                if rag_sources:
+                    source_labels = []
+                    for item in rag_sources[:5]:
+                        doc_name = str(item.get("doc_name") or "unknown")
+                        chunk_index = int(item.get("chunk_index") or 0)
+                        try:
+                            score = float(item.get("score") or 0.0)
+                        except (TypeError, ValueError):
+                            score = 0.0
+                        source_labels.append(f"{doc_name}#{chunk_index}({score:.3f})")
+
+                    logging.info(
+                        "[RAG] user=%s retrieved %s chunk(s): %s",
+                        user_id,
+                        len(rag_sources),
+                        ", ".join(source_labels),
+                    )
+                else:
+                    logging.info("[RAG] user=%s retrieved 0 chunk(s)", user_id)
+            except Exception as rag_error:
+                rag_context = ""
+                rag_sources = []
+                logging.warning("RAG query failed for user %s: %s", user_id, rag_error)
         
         # 4. เรียก AI API พร้อม retry mechanism (2 retries + grok_client built-in retry = 4 max)
         bot_response = None
@@ -1120,7 +1183,13 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         while retry_count < max_retries and bot_response is None:
             try:
-                response_text = generate_ai_response_with_timeout(messages, timeout=30, user_id=user_id, risk_level=pre_risk_level)
+                response_text = generate_ai_response_with_timeout(
+                    messages,
+                    timeout=30,
+                    user_id=user_id,
+                    risk_level=pre_risk_level,
+                    rag_context=rag_context,
+                )
                 
                 if not response_text:
                     raise ValueError("Empty AI response")
@@ -1390,7 +1459,13 @@ def _save_multi_ai_log(user_id: str, consensus) -> None:
         logging.warning(f"[multi-ai] Failed to persist consensus log: {e}")
 
 
-def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30, user_id: str = "system", risk_level: str = None) -> str:
+def generate_ai_response_with_timeout(
+    messages: List[Dict[str, str]],
+    timeout: int = 30,
+    user_id: str = "system",
+    risk_level: str = None,
+    rag_context: Optional[str] = None,
+) -> str:
     """เรียก AI API พร้อม timeout และคืนข้อความตอบกลับ
 
     Args:
@@ -1402,9 +1477,25 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     # ตรวจสอบว่า filtered_messages มี system message อยู่แล้วหรือไม่ เพื่อไม่ให้ซ้ำซ้อน
     has_system_msg = any(msg.get("role") == "system" for msg in filtered_messages)
     if has_system_msg:
-        api_messages = filtered_messages
+        api_messages = list(filtered_messages)
     else:
-        api_messages = [SYSTEM_MESSAGE_CORE] + filtered_messages
+        api_messages = [SYSTEM_MESSAGE_CORE] + list(filtered_messages)
+
+    if rag_context and rag_context.strip():
+        rag_message = {
+            "role": "system",
+            "content": (
+                "บริบทความรู้จากระบบ (สำหรับ AI — ห้ามเปิดเผยแหล่งที่มาหรือชื่อไฟล์ให้ผู้ใช้):\n"
+                f"{rag_context.strip()}\n\n"
+                "คำแนะนำ: ให้ความสำคัญกับข้อมูลข้างต้นสูงกว่าความรู้ทั่วไปจาก training "
+                "นำมาสังเคราะห์ผสมผสานกับบริบทการสนทนาอย่างเป็นธรรมชาติ "
+                "หากข้อมูลนี้ไม่เพียงพอหรือไม่เกี่ยวข้อง ให้ตอบอย่างระมัดระวังและถามผู้ใช้เพิ่มเติม"
+            ),
+        }
+        if api_messages and api_messages[0].get("role") == "system":
+            api_messages.insert(1, rag_message)
+        else:
+            api_messages.insert(0, rag_message)
 
     effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
 

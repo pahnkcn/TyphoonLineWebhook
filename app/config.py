@@ -1,4 +1,4 @@
-"""
+﻿"""
 โมดูลการกำหนดค่าสำหรับแชทบอท 'ใจดี'
 จัดการตัวแปรสภาพแวดล้อมและการตั้งค่าต่างๆ
 """
@@ -46,6 +46,16 @@ class Config:
     MULTI_AI_ENABLED: bool = field(default=False)
     MULTI_AI_TIMEOUT: int = field(default=45)
 
+    # Retrieval-Augmented Generation (RAG)
+    RAG_ENABLED: bool = field(default=True)
+    RAG_MIN_SCORE: float = field(default=0.35)
+    RAG_CHUNK_SIZE: int = field(default=1500)
+    RAG_CHUNK_OVERLAP: int = field(default=200)
+    RAG_EMBEDDING_DIM: int = field(default=1536)
+    RAG_TOP_K: int = field(default=5)
+    RAG_FETCH_K: int = field(default=24)
+    RAG_MAX_CONTEXT_CHARS: int = field(default=7000)
+
 def load_config():
     """
     โหลดและตรวจสอบตัวแปรสภาพแวดล้อมที่จำเป็น
@@ -86,6 +96,14 @@ def load_config():
         'XAI_MODEL': 'grok-4-1-fast-non-reasoning',
         'MULTI_AI_ENABLED': 'false',
         'MULTI_AI_TIMEOUT': '45',
+        'RAG_ENABLED': 'true',
+        'RAG_MIN_SCORE': '0.35',
+        'RAG_CHUNK_SIZE': '1500',
+        'RAG_CHUNK_OVERLAP': '200',
+        'RAG_EMBEDDING_DIM': '1536',
+        'RAG_TOP_K': '5',
+        'RAG_FETCH_K': '24',
+        'RAG_MAX_CONTEXT_CHARS': '7000',
     }
     
     for var, default in defaults.items():
@@ -94,7 +112,18 @@ def load_config():
             print(f"ใช้ค่าเริ่มต้นสำหรับ {var}: {default}")
     
     # ตรวจสอบค่าตัวเลข
-    numeric_vars = ['REDIS_PORT', 'REDIS_DB', 'MYSQL_PORT', 'PORT']
+    numeric_vars = [
+        'REDIS_PORT',
+        'REDIS_DB',
+        'MYSQL_PORT',
+        'PORT',
+        'RAG_CHUNK_SIZE',
+        'RAG_CHUNK_OVERLAP',
+        'RAG_EMBEDDING_DIM',
+        'RAG_TOP_K',
+        'RAG_FETCH_K',
+        'RAG_MAX_CONTEXT_CHARS',
+    ]
     for var in numeric_vars:
         try:
             int(os.getenv(var))
@@ -102,7 +131,7 @@ def load_config():
             print(f"ข้อผิดพลาด: {var} ต้องเป็นตัวเลข")
             sys.exit(1)
     
-    # ตรวจสอบ LOG_LEVEL ที่ถูกต้อง
+    # เธ•เธฃเธงเธเธชเธญเธ LOG_LEVEL เธ—เธตเนเธ–เธนเธเธ•เนเธญเธ
     valid_log_levels = {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'}
     log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
     if log_level not in valid_log_levels:
@@ -145,9 +174,23 @@ def load_config():
         XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-non-reasoning'),
         MULTI_AI_ENABLED=os.getenv('MULTI_AI_ENABLED', 'false').lower() in ('true', '1', 'yes'),
         MULTI_AI_TIMEOUT=int(os.getenv('MULTI_AI_TIMEOUT', '45')),
+        RAG_ENABLED=os.getenv('RAG_ENABLED', 'true').lower() in ('true', '1', 'yes'),
+        RAG_MIN_SCORE=float(os.getenv('RAG_MIN_SCORE', '0.35')),
+        RAG_CHUNK_SIZE=int(os.getenv('RAG_CHUNK_SIZE', '1500')),
+        RAG_CHUNK_OVERLAP=int(os.getenv('RAG_CHUNK_OVERLAP', '200')),
+        RAG_EMBEDDING_DIM=int(os.getenv('RAG_EMBEDDING_DIM', '1536')),
+        RAG_TOP_K=int(os.getenv('RAG_TOP_K', '5')),
+        RAG_FETCH_K=int(os.getenv('RAG_FETCH_K', '24')),
+        RAG_MAX_CONTEXT_CHARS=int(os.getenv('RAG_MAX_CONTEXT_CHARS', '7000')),
     )
 
-    logging.info(f"โหลดการตั้งค่าสำเร็จ (สภาพแวดล้อม: {environment}, โมเดล: {config.XAI_MODEL}, multi-ai: {config.MULTI_AI_ENABLED})")
+    logging.info(
+        "โหลดการตั้งค่าสำเร็จ (สภาพแวดล้อม: %s, โมเดล: %s, multi-ai: %s, rag: %s)",
+        environment,
+        config.XAI_MODEL,
+        config.MULTI_AI_ENABLED,
+        config.RAG_ENABLED,
+    )
     return config
 
 # ระบบข้อความสำหรับโมเดล
@@ -635,10 +678,13 @@ SYSTEM_MESSAGES = {
 
 ## 8. แหล่งข้อมูลอ้างอิง
 
-เมื่อต้องให้ข้อมูลเกี่ยวกับสารเสพติด ผลกระทบ และการรักษา ให้อ้างอิงจาก:
-- **National Institute on Drug Abuse (NIDA):** https://nida.nih.gov/
-- **กรมสุขภาพจิต กระทรวงสาธารณสุข**
-- **สำนักงานคณะกรรมการป้องกันและปราบปรามยาเสพติด (ป.ป.ส.)**
+เมื่อต้องให้ข้อมูลเกี่ยวกับสารเสพติด ผลกระทบ และการรักษา ให้ใช้ความรู้ตามลำดับความสำคัญดังนี้:
+1. **บริบทความรู้จากระบบ (RAG Knowledge Base)** — ข้อมูลที่ถูกแนบมาในข้อความ system เป็นแหล่งหลัก ให้ใช้ก่อนเสมอ
+2. **National Institute on Drug Abuse (NIDA):** https://nida.nih.gov/
+3. **กรมสุขภาพจิต กระทรวงสาธารณสุข**
+4. **สำนักงานคณะกรรมการป้องกันและปราบปรามยาเสพติด (ป.ป.ส.)**
+
+**หมายเหตุ:** เมื่อนำความรู้จาก knowledge base มาใช้ ให้สังเคราะห์เป็นภาษาธรรมชาติ ไม่ต้องอ้างชื่อไฟล์หรือแหล่งที่มาให้ผู้ใช้เห็น
 
 ---
 
@@ -663,46 +709,29 @@ SYSTEM_MESSAGE_CORE = {
     "content": """
 # น้องใจดี — AI ที่ปรึกษาด้านการบำบัดสารเสพติด
 
-## ตัวตนและบทบาท
-- **ชื่อ:** น้องใจดี | **สรรพนาม:** "ผม" + "ครับ" | **ภาษา:** ไทยเท่านั้น
-- **บุคลิก:** อบอุ่น ใจเย็น รับฟังโดยไม่ตัดสิน เหมือนพี่ที่ไว้ใจได้
-- **ภารกิจ:** ที่ปรึกษาและผู้ช่วยบำบัดสำหรับผู้มีปัญหาสารเสพติด ผู้ที่กำลังเลิก/ลดการใช้ และญาติ/คนใกล้ชิด
+## Persona และบทบาท
+- คุณคือ "น้องใจดี" ใช้สรรพนาม "ผม" และลงท้าย "ครับ"
+- สื่อสารภาษาไทยเท่านั้น น้ำเสียงอบอุ่น สุภาพ ไม่ตัดสิน
+- บทบาทคือผู้ช่วยสนทนาเชิงสนับสนุนด้านการเลิก/ลดการใช้สารเสพติด
 
-**ทำได้:** รับฟัง ให้กำลังใจ ให้ข้อมูลสารเสพติด สำรวจแรงจูงใจ แนะนำบริการบำบัด สอนเทคนิครับมือ
-**ทำไม่ได้:** วินิจฉัยโรค สั่งยา รับประกันผลบำบัด เก็บข้อมูลส่วนตัว
+## แนวทางการตอบ
+- ตอบกระชับ อ่านง่าย: ปกติ 2-4 ประโยค
+- ถามทีละ 1 คำถาม ไม่ยิงคำถามหลายข้อพร้อมกัน
+- สะท้อนความรู้สึก + ชื่นชมความพยายามของผู้ใช้อย่างจริงใจ
+- หลีกเลี่ยงคำสั่งตรงๆ หรือภาษาตำหนิ
+- ถ้าข้อมูลไม่พอ ให้ถามเพิ่มก่อนสรุปหรือแนะนำ
+- ใช้กรอบ **Motivational Interviewing (MI)** และทักษะ **OARS** ในการสนทนา
 
-## ลักษณะการสนทนา
-- ใช้ภาษาไทยอบอุ่น เป็นมิตร ประโยคสั้นกระชับ
-- **ข้อความปกติ 2-4 ประโยค** | สะท้อน/สรุปไม่เกิน 5-6 ประโยค
-- **ถามทีละ 1 คำถาม** ไม่ถามหลายคำถามพร้อมกัน
-- อาจใช้อิโมจิที่เหมาะสม (🙂🙏💪) แต่ไม่มากเกินไป
+## ขอบเขตความปลอดภัย
+- ห้ามวินิจฉัยโรค ห้ามสั่งยา และห้ามให้คำแนะนำที่เสี่ยงอันตราย
+- เมื่อพบสัญญาณอันตรายเร่งด่วน ให้แนะนำติดต่อผู้เชี่ยวชาญทันที
+- หมายเลขฉุกเฉินที่ต้องให้ได้: 1323, 1165, 1669
 
-## กรอบทฤษฎีหลัก: Motivational Interviewing (MI)
-- **MI Spirit (PACE):** Partnership, Acceptance, Compassion, Evocation
-- **ทักษะ OARS:** Open questions (ถามทีละ 1), Affirmation (ชื่นชมเฉพาะเจาะจง), Reflection (Simple/Complex/Double-Sided), Summary
-- **เสริม Change Talk (DARN-CAT):** Desire, Ability, Reason, Need, Commitment, Activation, Taking Steps
-- **รับฟัง Sustain Talk** โดยไม่โต้แย้ง
-- **Harm Reduction:** ไม่บังคับเลิกทันที พบผู้ใช้ที่จุดที่เขาอยู่ ชื่นชมทุกก้าวเล็กๆ
-
-## แนวทางเพิ่มเติม
-- **Trauma-Informed:** ไม่กดดันให้เล่ารายละเอียด ไม่ถาม "ทำไม" Validate ความรู้สึก
-- **CBT:** ช่วยสังเกตความคิด-ความรู้สึก-พฤติกรรม ถามสำรวจไม่ใช่บอกว่าผิด
-- **Relapse:** ไม่ใช่ความล้มเหลว ใช้เป็นบทเรียน Normalize
-- **ญาติ (CRAFT):** ดูแลตนเองก่อน เปลี่ยนปฏิสัมพันธ์ เสริมแรงพฤติกรรมดี
-
-## ภาวะฉุกเฉิน
-เมื่อพบสัญญาณเสี่ยงสูง (ทำร้ายตัวเอง/ผู้อื่น, อาการทางจิตรุนแรง, ถอนยารุนแรง):
-→ แนะนำสายด่วนสุขภาพจิต 1323, สายด่วนยาเสพติด 1165, หน่วยกู้ชีพ 1669 ทันที
-→ ถามว่ามีคนอยู่ใกล้ๆ ที่ช่วยได้ไหม
-
-## หลักการสำคัญ
-1. รับฟังโดยไม่ตัดสิน
-2. พบผู้ใช้ที่จุดที่เขาอยู่
-3. ผู้ใช้เป็นผู้เชี่ยวชาญในชีวิตของตนเอง
-4. การเปลี่ยนแปลงต้องมาจากภายใน
-5. ทุกก้าวเล็กๆ มีคุณค่า
-6. Relapse ไม่ใช่ความล้มเหลว
-7. รู้ขอบเขต — ส่งต่อเมื่อเกินความสามารถ
+## การใช้ความรู้จาก Knowledge Base
+- เมื่อมี **บริบทความรู้จากระบบ** แนบมา ให้ใช้ข้อมูลนั้นเป็นแหล่งหลักก่อนเสมอ ให้ความสำคัญสูงกว่าความรู้ทั่วไปจาก training
+- นำความรู้จาก knowledge base มา **สังเคราะห์ผสมผสาน** กับบริบทการสนทนาอย่างเป็นธรรมชาติ ไม่ใช่แค่ copy-paste
+- ห้ามอ้างถึงชื่อไฟล์หรือรหัสเอกสาร (เช่น 01_motivational_interviewing.md) ให้ผู้ใช้ ให้พูดเนื้อหาแทน
+- หากบริบทความรู้ไม่มีข้อมูลเพียงพอหรือไม่เกี่ยวข้อง ให้ตอบด้วยความระมัดระวัง และชวนผู้ใช้เล่าบริบทเพิ่มเติม
 """
 }
 
@@ -729,10 +758,18 @@ SYSTEM_MESSAGE_SUMMARY = {
 
 # คอนฟิกการสร้างข้อความ - แยกตามบริบท
 # สำหรับการสนทนาทั่วไป (Motivational Interviewing)
+if "น้องใจดี" not in SYSTEM_MESSAGE_CORE["content"]:
+    SYSTEM_MESSAGE_CORE["content"] = f"น้องใจดี\n{SYSTEM_MESSAGE_CORE['content']}"
+
+if "สรุป" not in SYSTEM_MESSAGE_SUMMARY["content"]:
+    SYSTEM_MESSAGE_SUMMARY["content"] = f"สรุป\n{SYSTEM_MESSAGE_SUMMARY['content']}"
+
 GENERATION_CONFIG = {
     "temperature": 0.8,
     "max_tokens": 1500,  # ลดจาก 8000 → ข้อความ 2-4 ประโยค ไม่ต้องการมาก
     "top_p": 0.9,
+    "presence_penalty": 0.6,
+    "frequency_penalty": 0.2,
 }
 
 # สำหรับสถานการณ์วิกฤต/ฉุกเฉิน
@@ -740,6 +777,8 @@ CRISIS_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 2000,  # ลดจาก 6000 → ข้อความวิกฤตต้องกระชับ ชัดเจน
     "top_p": 0.5,
+    "presence_penalty": 0.4,
+    "frequency_penalty": 0.5,
 }
 
 # สำหรับการให้ข้อมูลเกี่ยวกับสารเสพติด/การรักษา
@@ -747,6 +786,8 @@ INFO_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 3000,  # ลดจาก 6000 → ข้อมูลอาจยาวกว่าปกติ แต่ไม่ต้อง 6000
     "top_p": 0.7,
+    "presence_penalty": 0.3,
+    "frequency_penalty": 0.4,
 }
 
 # คอนฟิกการสร้างข้อความสรุป
@@ -754,6 +795,8 @@ SUMMARY_GENERATION_CONFIG = {
     "temperature": 0.3,
     "max_tokens": 4000,  # ลดจาก 16000 → สรุปควรกระชับ
     "top_p": 0.5,
+    "presence_penalty": 0.2,
+    "frequency_penalty": 0.4,
 }
 
 # ค่า token threshold สำหรับจัดการประวัติการสนทนา
@@ -761,7 +804,7 @@ SUMMARY_GENERATION_CONFIG = {
 # เนื่องจากไม่คำนึงถึง token cost ให้จำประวัติได้มากขึ้นเพื่อคุณภาพการบำบัด
 TOKEN_THRESHOLD = 600000
 
-# ขีดจำกัด context window สูงสุดของ Grok-4 (ใช้ได้ 90% เพื่อความปลอดภัย)
+# เธเธตเธ”เธเธณเธเธฑเธ” context window เธชเธนเธเธชเธธเธ”เธเธญเธ Grok-4 (เนเธเนเนเธ”เน 90% เน€เธเธทเนเธญเธเธงเธฒเธกเธเธฅเธญเธ”เธ เธฑเธข)
 MAX_CONTEXT_WINDOW = int(2000000 * 0.9)  # 1,800,000 tokens
 
 
@@ -782,14 +825,30 @@ def get_dynamic_config(user_message: str, conversation_history: list = None) -> 
         'overdose', 'เกินขนาด', 'ก้าวร้าว', 'ทำร้ายคน',
         'ฆ่า', 'หมดหวัง', 'ไม่มีทางออก', 'จบชีวิต'
     ]
+    crisis_keywords.extend([
+        'ฆ่าตัวตาย',
+        'ทำร้ายตัวเอง',
+        'อยากตาย',
+        'ไม่อยากมีชีวิต',
+        'suicide',
+        'self-harm',
+    ])
 
-    # คำสำคัญสำหรับการขอข้อมูล
+    # เธเธณเธชเธณเธเธฑเธเธชเธณเธซเธฃเธฑเธเธเธฒเธฃเธเธญเธเนเธญเธกเธนเธฅ
     info_keywords = [
         'คืออะไร', 'อธิบาย', 'ข้อมูล', 'รายละเอียด',
         'ผลข้างเคียง', 'อาการ', 'วิธีการ', 'ขั้นตอน',
         'ยาอะไร', 'สารอะไร', 'เสพติดชนิดไหน', 'ความรู้',
         'บอกหน่อย', 'แนะนำหน่อย', 'ช่วยอธิบาย'
     ]
+    info_keywords.extend([
+        'คืออะไร',
+        'อธิบาย',
+        'ข้อมูล',
+        'ยาบ้า',
+        'what is',
+        'explain',
+    ])
 
     message_lower = user_message.lower()
 
@@ -805,3 +864,4 @@ def get_dynamic_config(user_message: str, conversation_history: list = None) -> 
 
     # ค่าเริ่มต้น: การสนทนาทั่วไป
     return GENERATION_CONFIG
+

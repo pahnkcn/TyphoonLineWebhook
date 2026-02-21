@@ -61,6 +61,12 @@ class DatabaseInitializer:
                 self._create_multi_ai_logs_table()
                 logging.info("สร้างตาราง multi_ai_logs สำเร็จ")
 
+            # ตรวจสอบและสร้างตาราง knowledge_chunks
+            if not self.db.table_exists('knowledge_chunks'):
+                logging.info("ไม่พบตาราง knowledge_chunks กำลังสร้าง...")
+                self._create_knowledge_chunks_table()
+                logging.info("สร้างตาราง knowledge_chunks สำเร็จ")
+
             logging.info("การเริ่มต้นฐานข้อมูลสำเร็จ")
             return True
 
@@ -156,6 +162,23 @@ class DatabaseInitializer:
                 INDEX idx_mai_timestamp (timestamp),
                 INDEX idx_mai_user_id (user_id),
                 INDEX idx_mai_best_provider (best_provider)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        """
+        self.db.execute_and_commit(query)
+
+    def _create_knowledge_chunks_table(self) -> None:
+        """สร้างตาราง knowledge_chunks สำหรับเก็บ embedding ของ RAG"""
+        query = """
+            CREATE TABLE knowledge_chunks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                doc_id VARCHAR(64) NOT NULL,
+                doc_name VARCHAR(255) NOT NULL,
+                chunk_index INT NOT NULL,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_doc_id (doc_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """
         self.db.execute_and_commit(query)

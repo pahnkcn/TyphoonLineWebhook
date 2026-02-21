@@ -8,6 +8,7 @@ import hmac
 import logging
 from datetime import datetime, timedelta
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, request, jsonify, render_template, Response
@@ -19,7 +20,13 @@ dashboard_bp = Blueprint('dashboard', __name__)
 
 # CORS for dashboard API endpoints only (not the whole app)
 _dashboard_cors_origins = os.getenv('DASHBOARD_CORS_ORIGINS', '').split(',') if os.getenv('DASHBOARD_CORS_ORIGINS') else []
-CORS(dashboard_bp, resources={r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]}})
+CORS(
+    dashboard_bp,
+    resources={
+        r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]},
+        r"/api/knowledge/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "POST", "OPTIONS"]},
+    },
+)
 
 
 @dashboard_bp.after_request
@@ -38,19 +45,34 @@ _DASHBOARD_API_KEY: str = ''
 _HIGH_RISK_KEYWORDS = set()
 _MEDIUM_RISK_KEYWORDS = set()
 _GENERAL_RISK_LEVEL = 'general'
+_knowledge_base = None
 
 
-def init_dashboard(db, db_manager, redis_client, general_risk_level='general'):
+def init_dashboard(db, db_manager, redis_client, general_risk_level='general', knowledge_base=None):
     """Wire runtime dependencies into the dashboard module."""
-    global _db, _db_manager, _redis_client, _DASHBOARD_API_KEY
+    global _db, _db_manager, _redis_client, _DASHBOARD_API_KEY, _knowledge_base
     global _HIGH_RISK_KEYWORDS, _MEDIUM_RISK_KEYWORDS, _GENERAL_RISK_LEVEL
     _db = db
     _db_manager = db_manager
     _redis_client = redis_client
+    _knowledge_base = knowledge_base
     _DASHBOARD_API_KEY = os.getenv('DASHBOARD_API_KEY', '')
     _HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
     _MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
     _GENERAL_RISK_LEVEL = general_risk_level
+
+
+def _sanitize_filename(filename: str) -> str:
+    cleaned = os.path.basename(filename or '').strip()
+    if not cleaned:
+        return ''
+    return ''.join(ch for ch in cleaned if ch.isalnum() or ch in {'.', '_', '-'})
+
+
+def _ensure_knowledge_base():
+    if _knowledge_base is None:
+        return False, (jsonify({'error': 'rag_unavailable', 'message': 'RAG knowledge base is disabled or unavailable'}), 503)
+    return True, None
 
 
 def _require_dashboard_auth():
@@ -642,6 +664,76 @@ def get_multi_ai_stats():
             'error': 'multi_ai_stats_failed',
             'message': 'Multi-AI statistics are unavailable at the moment.',
         }), 500
+
+
+@dashboard_bp.route('/api/knowledge/stats', methods=['GET'])
+def get_knowledge_stats():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    try:
+        return jsonify(_knowledge_base.get_stats())
+    except Exception as exc:
+        logging.error('Error fetching knowledge stats: %s', exc, exc_info=True)
+        return jsonify({'error': 'knowledge_stats_failed'}), 500
+
+
+@dashboard_bp.route('/api/knowledge/reindex', methods=['POST'])
+def reindex_knowledge_docs():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    try:
+        result = _knowledge_base.ingest_directory(force_reindex=True)
+        return jsonify(result)
+    except Exception as exc:
+        logging.error('Knowledge reindex failed: %s', exc, exc_info=True)
+        return jsonify({'error': 'knowledge_reindex_failed'}), 500
+
+
+@dashboard_bp.route('/api/knowledge/upload', methods=['POST'])
+def upload_knowledge_file():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'missing_file'}), 400
+
+    uploaded_file = request.files['file']
+    safe_name = _sanitize_filename(uploaded_file.filename)
+    if not safe_name:
+        return jsonify({'error': 'invalid_filename'}), 400
+
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in {'.pdf', '.docx', '.txt', '.md'}:
+        return jsonify({'error': 'unsupported_file_type'}), 400
+
+    docs_dir = Path(getattr(_knowledge_base, 'docs_dir', 'knowledge_docs'))
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = docs_dir / safe_name
+
+    try:
+        uploaded_file.save(str(dest_path))
+        result = _knowledge_base.ingest_file(str(dest_path), force_reindex=True)
+        return jsonify(result)
+    except Exception as exc:
+        logging.error('Knowledge upload failed for %s: %s', safe_name, exc, exc_info=True)
+        return jsonify({'error': 'knowledge_upload_failed'}), 500
 
 
 def _anonymize_user_id(user_id: str, salt: str = '') -> str:
