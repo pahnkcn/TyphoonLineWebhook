@@ -40,7 +40,7 @@ class Config:
     PORT: int
     
     # ตัวแปรที่มีค่าเริ่มต้นต้องมาหลังตัวแปรที่ไม่มีค่าเริ่มต้น
-    XAI_MODEL: str = field(default="grok-4-1-fast-reasoning")
+    XAI_MODEL: str = field(default="grok-4-1-fast-non-reasoning")
     
     # Multi-AI Consensus
     MULTI_AI_ENABLED: bool = field(default=False)
@@ -83,7 +83,7 @@ def load_config():
         'ENVIRONMENT': 'development',
         'LOG_LEVEL': 'INFO',
         'PORT': '5000',
-        'XAI_MODEL': 'grok-4-1-fast-reasoning',
+        'XAI_MODEL': 'grok-4-1-fast-non-reasoning',
         'MULTI_AI_ENABLED': 'false',
         'MULTI_AI_TIMEOUT': '45',
     }
@@ -142,7 +142,7 @@ def load_config():
         ENVIRONMENT=environment,
         LOG_LEVEL=os.getenv('LOG_LEVEL'),
         PORT=int(os.getenv('PORT')),
-        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-reasoning'),
+        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-non-reasoning'),
         MULTI_AI_ENABLED=os.getenv('MULTI_AI_ENABLED', 'false').lower() in ('true', '1', 'yes'),
         MULTI_AI_TIMEOUT=int(os.getenv('MULTI_AI_TIMEOUT', '45')),
     )

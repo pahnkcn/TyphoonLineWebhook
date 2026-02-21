@@ -76,7 +76,7 @@ PROVIDER_DEFINITIONS: List[Dict] = [
         "name": "grok",
         "api_key_env": "XAI_API_KEY",
         "base_url": "https://api.x.ai/v1",
-        "default_model": "grok-4-1-fast-reasoning",
+        "default_model": "grok-4-1-fast-non-reasoning",
         "model_env": "XAI_MODEL",
     },
     {
