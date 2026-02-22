@@ -21,18 +21,103 @@ _FILLER_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
-_TOPIC_EXPANSIONS = {
-    "crisis": "emergency hotline safety plan urgent referral 1323 1669",
-    "overdose": "opioid stimulant emergency referral hospital 1669",
-    "relapse": "lapse trigger coping plan prevention recovery",
-    "cbt": "cognitive reframing thought record behavioural activation",
-    "dbt": "distress tolerance emotion regulation mindfulness",
-    "family": "craft communication boundaries support plan",
-    "motivation": "motivational interviewing stages of change commitment",
-    "withdrawal": "withdrawal symptoms monitoring medical support",
-}
+_TOPIC_EXPANSION_RULES: List[Tuple[Tuple[str, ...], str]] = [
+    (
+        (
+            "crisis",
+            "emergency",
+            "urgent",
+            "suicide",
+            "self-harm",
+            "harm myself",
+            "ฉุกเฉิน",
+            "เร่งด่วน",
+            "ทำร้ายตัวเอง",
+            "ฆ่าตัวตาย",
+            "ไม่อยากมีชีวิตอยู่",
+        ),
+        "emergency hotline safety plan urgent referral 1323 1669",
+    ),
+    (
+        (
+            "overdose",
+            "opioid",
+            "stimulant",
+            "เสพเกินขนาด",
+            "โอเวอร์โดส",
+            "หมดสติ",
+        ),
+        "opioid stimulant emergency referral hospital overdose 1669",
+    ),
+    (
+        (
+            "relapse",
+            "lapse",
+            "กลับไปใช้",
+            "กลับไปเสพ",
+            "ใช้ซ้ำ",
+            "เสพซ้ำ",
+            "เผลอใช้",
+        ),
+        "relapse lapse trigger coping plan prevention recovery",
+    ),
+    (
+        (
+            "withdrawal",
+            "detox",
+            "ลงแดง",
+            "ถอนยา",
+            "อาการถอน",
+        ),
+        "withdrawal symptoms monitoring medical support detox",
+    ),
+    (
+        (
+            "motivational interviewing",
+            "change talk",
+            "motivation",
+            "readiness",
+            "แรงจูงใจ",
+            "ความพร้อมเปลี่ยน",
+            "สัมภาษณ์เสริมแรงจูงใจ",
+        ),
+        "motivational interviewing stages of change commitment change talk",
+    ),
+    (
+        (
+            "family",
+            "caregiver",
+            "ครอบครัว",
+            "ญาติ",
+            "ผู้ดูแล",
+        ),
+        "craft communication boundaries support plan family",
+    ),
+    (
+        (
+            "cbt",
+            "ความคิดอัตโนมัติ",
+            "บันทึกความคิด",
+        ),
+        "cognitive reframing thought record behavioural activation",
+    ),
+    (
+        (
+            "dbt",
+            "กำกับอารมณ์",
+            "ทนทานความเครียด",
+        ),
+        "distress tolerance emotion regulation mindfulness",
+    ),
+]
 
 _DOC_TOPIC_MAP = {
+    "miti": "mi_quality",
+    "integrity": "mi_quality",
+    "manual": "mi_quality",
+    "arztebl": "research",
+    "dtsch": "research",
+    "evidence": "research",
     "motivational": "mi",
     "stages": "stages_of_change",
     "harm_reduction": "harm_reduction",
@@ -235,12 +320,16 @@ class KnowledgeBase:
 
         lowered = cleaned.lower()
         expansions: List[str] = []
-        for keyword, expansion in _TOPIC_EXPANSIONS.items():
-            if keyword in lowered:
+        seen_expansions = set()
+        for keywords, expansion in _TOPIC_EXPANSION_RULES:
+            if expansion in seen_expansions:
+                continue
+            if any(keyword in lowered for keyword in keywords):
                 expansions.append(expansion)
+                seen_expansions.add(expansion)
 
-        if len(_tokenize(cleaned)) <= 8 and expansions:
-            cleaned = f"{cleaned} {' '.join(expansions[:2])}".strip()
+        if len(_tokenize(cleaned)) <= 12 and expansions:
+            cleaned = f"{cleaned} {' '.join(expansions[:3])}".strip()
         return cleaned
 
     @staticmethod

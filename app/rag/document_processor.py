@@ -429,6 +429,86 @@ def _chunk_text_token_mode(text: str, chunk_size: int, overlap: int) -> List[str
     return chunks
 
 
+def _same_page_span(left_meta: Dict[str, object], right_meta: Dict[str, object]) -> bool:
+    return (
+        left_meta.get("page_start") == right_meta.get("page_start")
+        and left_meta.get("page_end") == right_meta.get("page_end")
+    )
+
+
+def _merge_section_titles(left_title: str, right_title: str) -> str:
+    left_clean = str(left_title or "").strip()
+    right_clean = str(right_title or "").strip()
+    if not left_clean:
+        return right_clean
+    if not right_clean or right_clean == left_clean:
+        return left_clean
+    return f"{left_clean} | {right_clean}"
+
+
+def _merge_chunk_metadata(left_meta: Dict[str, object], right_meta: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(left_meta or {})
+    merged["section_title"] = _merge_section_titles(
+        str(left_meta.get("section_title") or ""),
+        str(right_meta.get("section_title") or ""),
+    )
+    merged["page_start"] = left_meta.get("page_start", right_meta.get("page_start"))
+    merged["page_end"] = right_meta.get("page_end", left_meta.get("page_end"))
+    merged["segment_index_end"] = right_meta.get("segment_index")
+    return merged
+
+
+def _merge_short_document_chunks(
+    chunks: List[DocumentChunk],
+    min_tokens: int,
+    max_tokens: int,
+) -> List[DocumentChunk]:
+    if not chunks:
+        return []
+
+    merged: List[DocumentChunk] = []
+    for chunk in chunks:
+        content = str(chunk.content or "").strip()
+        if not content:
+            continue
+
+        current = DocumentChunk(content=content, metadata=dict(chunk.metadata or {}))
+        current_tokens = _token_count(content)
+
+        if merged and current_tokens < min_tokens:
+            previous = merged[-1]
+            previous_tokens = _token_count(previous.content)
+            if (
+                previous_tokens + current_tokens <= max_tokens
+                and _same_page_span(previous.metadata, current.metadata)
+            ):
+                merged[-1] = DocumentChunk(
+                    content=f"{previous.content}\n\n{current.content}".strip(),
+                    metadata=_merge_chunk_metadata(previous.metadata, current.metadata),
+                )
+                continue
+
+        merged.append(current)
+
+    if len(merged) >= 2:
+        last = merged[-1]
+        previous = merged[-2]
+        last_tokens = _token_count(last.content)
+        previous_tokens = _token_count(previous.content)
+        if (
+            last_tokens < min_tokens
+            and previous_tokens + last_tokens <= max_tokens
+            and _same_page_span(previous.metadata, last.metadata)
+        ):
+            merged[-2] = DocumentChunk(
+                content=f"{previous.content}\n\n{last.content}".strip(),
+                metadata=_merge_chunk_metadata(previous.metadata, last.metadata),
+            )
+            merged.pop()
+
+    return merged
+
+
 def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[str]:
     if not text or not text.strip():
         return []
@@ -454,8 +534,7 @@ def chunk_document(
     path = Path(file_path)
     segments = load_document_segments(path)
 
-    results: List[DocumentChunk] = []
-    global_chunk_index = 0
+    provisional_chunks: List[DocumentChunk] = []
 
     for segment_index, segment in enumerate(segments):
         base_metadata = dict(segment.metadata or {})
@@ -465,21 +544,42 @@ def chunk_document(
             content = chunk_content.strip()
             if not content:
                 continue
-            token_count = _token_count(content)
             metadata = {
                 "source": path.name,
                 "source_path": str(path.resolve()),
-                "chunk_index": global_chunk_index,
                 "chunk_in_segment": chunk_in_segment,
                 "segment_index": segment_index,
                 "section_title": str(base_metadata.get("section_title") or ""),
                 "page_start": base_metadata.get("page_start"),
                 "page_end": base_metadata.get("page_end"),
+            }
+            provisional_chunks.append(DocumentChunk(content=content, metadata=metadata))
+
+    if chunk_size > 256 and provisional_chunks:
+        token_limit = _resolve_token_limit(chunk_size)
+        min_tokens = max(24, min(80, token_limit // 8))
+        max_tokens = max(min_tokens * 3, int(token_limit * 0.90))
+        provisional_chunks = _merge_short_document_chunks(
+            provisional_chunks,
+            min_tokens=min_tokens,
+            max_tokens=max_tokens,
+        )
+
+    results: List[DocumentChunk] = []
+    for global_chunk_index, chunk in enumerate(provisional_chunks):
+        content = str(chunk.content or "").strip()
+        if not content:
+            continue
+        token_count = _token_count(content)
+        metadata = dict(chunk.metadata or {})
+        metadata.update(
+            {
+                "chunk_index": global_chunk_index,
                 "language": _detect_language(content),
                 "char_count": len(content),
                 "token_count": token_count,
             }
-            results.append(DocumentChunk(content=content, metadata=metadata))
-            global_chunk_index += 1
+        )
+        results.append(DocumentChunk(content=content, metadata=metadata))
 
     return results

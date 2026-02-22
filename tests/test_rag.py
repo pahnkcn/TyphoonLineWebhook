@@ -199,6 +199,25 @@ class TestDocumentProcessor:
         assert int(first_meta.get("token_count") or 0) > 0
         assert int(first_meta.get("char_count") or 0) > 0
 
+    def test_chunk_document_merges_short_chunks_in_token_mode(self, tmp_path: Path):
+        doc_path = tmp_path / "mi-guide.md"
+        doc_path.write_text(
+            "\n\n".join(
+                [
+                    "## Session A\n" + ("change talk momentum " * 70).strip(),
+                    "## Quick Check\nbrief follow up",
+                    "## Session B\n" + ("planning and commitment language " * 70).strip(),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        doc_chunks = chunk_document(str(doc_path), chunk_size=1500, overlap=200)
+        token_counts = [int(chunk.metadata.get("token_count") or 0) for chunk in doc_chunks]
+
+        assert len(doc_chunks) == 2
+        assert all(token_count >= 24 for token_count in token_counts)
+
 
 class TestEmbeddingClient:
     def test_openrouter_default_embedding_model(self):
@@ -761,6 +780,64 @@ class TestKnowledgeBase:
         assert result["context"]
         assert result["sources"]
         assert result["sources"][0]["doc_name"] == "guide.md"
+
+    def test_preprocess_query_adds_cross_lingual_hints_for_thai_relapse(self):
+        processed = KnowledgeBase._preprocess_query(
+            "\u0e01\u0e25\u0e31\u0e27\u0e08\u0e30\u0e01\u0e25\u0e31\u0e1a\u0e44\u0e1b\u0e43\u0e0a\u0e49\u0e2d\u0e35\u0e01"
+        )
+        assert "relapse" in processed
+        assert "coping plan" in processed
+
+    def test_query_can_retrieve_english_doc_from_thai_relapse_query(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
+
+        db = _InMemoryDBManager()
+        doc_path = tmp_path / "relapse_guide.md"
+        doc_path.write_text("relapse prevention coping plan trigger map", encoding="utf-8")
+
+        kb = KnowledgeBase(
+            db_manager=db,
+            redis_client=None,
+            docs_dir=str(tmp_path),
+            chunk_size=80,
+            overlap=10,
+            embedding_dim=16,
+        )
+        kb.ingest_file(str(doc_path))
+
+        context = kb.query(
+            "\u0e01\u0e25\u0e31\u0e27\u0e08\u0e30\u0e01\u0e25\u0e31\u0e1a\u0e44\u0e1b\u0e43\u0e0a\u0e49 \u0e2d\u0e22\u0e32\u0e01\u0e44\u0e14\u0e49\u0e41\u0e1c\u0e19\u0e1b\u0e49\u0e2d\u0e07\u0e01\u0e31\u0e19",
+            top_k=2,
+        )
+        assert "relapse_guide.md" in context
+
+    def test_ingest_sets_topic_for_new_filename_patterns(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
+
+        db = _InMemoryDBManager()
+        miti_doc = tmp_path / "miti4_2.md"
+        research_doc = tmp_path / "Dtsch_Arztebl_Int-118_0109.md"
+        miti_doc.write_text("change talk coding manual examples", encoding="utf-8")
+        research_doc.write_text("evidence based motivational interviewing outcomes", encoding="utf-8")
+
+        kb = KnowledgeBase(
+            db_manager=db,
+            redis_client=None,
+            docs_dir=str(tmp_path),
+            chunk_size=120,
+            overlap=20,
+            embedding_dim=16,
+        )
+
+        kb.ingest_file(str(miti_doc))
+        kb.ingest_file(str(research_doc))
+
+        topics = {
+            str(record.get("doc_name")): str((record.get("metadata") or {}).get("topic") or "")
+            for record in kb.vector_store._records
+        }
+        assert topics.get("miti4_2.md") == "mi_quality"
+        assert topics.get("Dtsch_Arztebl_Int-118_0109.md") == "research"
 
 
 class TestIntegration:
