@@ -1,5 +1,7 @@
 """Tests for services.context_manager — summarization helpers and filter_messages_for_api."""
+from unittest.mock import MagicMock, patch
 import pytest
+import app.session_manager as session_manager
 from app.services.context_manager import (
     chunk_conversation_history,
     filter_messages_for_api,
@@ -106,3 +108,17 @@ class TestFilterMessagesForApi:
         result = filter_messages_for_api(messages)
         roles = [m["role"] for m in result]
         assert roles == ["system", "user", "assistant", "user"]
+
+
+class TestHybridContextManagement:
+    def test_delegates_to_optimize_context(self):
+        mock_config = MagicMock()
+        expected = [{"role": "system_summary", "content": "summary"}]
+
+        with patch.object(session_manager, "_config", mock_config), \
+             patch("app.session_manager.get_chat_session", return_value=[{"role": "user", "content": "hello"}]), \
+             patch("app.services.context_manager.optimize_context", return_value=expected) as mock_optimize:
+            result = session_manager.hybrid_context_management("user-1", 123)
+
+        assert result == expected
+        mock_optimize.assert_called_once_with("user-1", mock_config, None, max_tokens=123)

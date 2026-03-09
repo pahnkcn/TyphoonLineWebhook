@@ -102,6 +102,23 @@ _AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.getenv('AI_EXECUTOR_WORKERS', '4'))
 )
 
+# Shared ThreadPoolExecutor for background tasks
+_BACKGROUND_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv('BACKGROUND_EXECUTOR_WORKERS', '4'))
+)
+
+def _submit_background_task(task_name: str, func, *args, **kwargs) -> None:
+    def _run():
+        try:
+            func(*args, **kwargs)
+        except Exception as exc:
+            logging.error(f"[background:{task_name}] {exc}", exc_info=True)
+
+    try:
+        _BACKGROUND_EXECUTOR.submit(_run)
+    except RuntimeError as exc:
+        logging.error(f"Failed to submit background task '{task_name}': {exc}")
+
 # Circuit breakers สำหรับป้องกัน cascading failures
 _xai_circuit_breaker = CircuitBreaker(
     name='xai_api',
@@ -129,7 +146,6 @@ PROCESSING_MESSAGES = [
 ]
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
-
 
 # สร้างอินสแตนซ์แอป Flask
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -457,7 +473,7 @@ def register_user_with_code(user_id, code):
 
         # Invalidate registration cache so subsequent checks see the new status immediately
         try:
-            redis_client.setex(f"registered:{user_id}", 300, '1')
+            redis_client.setex(cache_key, 300, '1')
         except Exception:
             pass
 
@@ -1271,11 +1287,11 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
             'fallback_response': fallback_response,
             'error_occurred': error_occurred,
         }
-        threading.Thread(
-            target=_post_response_background,
-            kwargs=_post_response_args,
-            daemon=True,
-        ).start()
+        _submit_background_task(
+            'post_response',
+            _post_response_background,
+            **_post_response_args,
+        )
         
     except ChatbotError as e:
         # จัดการ custom errors
@@ -1771,7 +1787,7 @@ def send_system_notification(user_id: str, used_fallback: bool, had_error: bool)
         except Exception as e:
             logging.debug(f"Failed to send system notification to {user_id}: {e}")
             
-    threading.Thread(target=send_delayed, daemon=True).start()
+    _submit_background_task('system_notification', send_delayed)
 
 
 def handle_chatbot_error(error: ChatbotError, user_id: str, user_message: str, reply_token: Optional[str] = None):
@@ -1908,7 +1924,11 @@ def send_rate_limit_notification(user_id: str, wait_time: int):
         message = (
             f"⏳ ขออภัยครับ ระบบกำลังประมวลผลหนัก\n"
             f"กรุณารอประมาณ {wait_time} วินาที แล้วลองใหม่อีกครั้ง\n\n"
-            "ใจดีจะรีบกลับมาคุยกับคุณโดยเร็วที่สุดนะครับ 💚"
+            "ใจดียังคงอยู่ที่นี่และพร้อมรับฟังคุณ "
+            "กรุณาลองพูดคุยกับใจดีอีกครั้งในอีกสักครู่นะครับ\n\n"
+            "หากต้องการความช่วยเหลือเร่งด่วน:\n"
+            "📞 สายด่วนยาเสพติด: 1165\n"
+            "📞 สายด่วนสุขภาพจิต: 1323"
         )
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
     except Exception as e:
@@ -2010,7 +2030,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             now = datetime.now()
             form_data_json = json.dumps({
                 "full_data": {},
-                "ai_summary": "",
+                "ai_summary": "",  # จะถูกอัปเดทภายหลังโดย background thread
                 "skip_verify": True,
                 "processed_at": now.isoformat()
             })
@@ -2018,12 +2038,6 @@ def handle_command_with_processing(user_id, command, reply_token=None):
                 insert_query,
                 (skip_code, user_id, now, now, 'verified', form_data_json)
             )
-
-            # Invalidate registration cache
-            try:
-                redis_client.setex(f"registered:{user_id}", 300, '1')
-            except Exception:
-                pass
 
             logging.info(f"ผู้ใช้ {user_id} ข้ามการยืนยันตัวตนด้วยคำสั่ง /skipverify (code: {skip_code})")
 
@@ -2236,12 +2250,14 @@ def handle_response_timing(start_time, animation_success):
         # หน่วงเล็กน้อยเพื่อให้ animation แสดงสักครู่ แต่ไม่นานเกินไป
         time.sleep(2 - elapsed_time)
 
-# เส้นทาง Flask
 @app.route("/callback", methods=['POST'])
 @limiter.limit("10/minute")
 def callback():
     # รับค่า X-Line-Signature header
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
+    if not signature:
+        app.logger.warning("Missing X-Line-Signature header")
+        abort(400)
 
     # รับเนื้อหาคำขอเป็นข้อความ
     body = request.get_data(as_text=True)
@@ -2307,13 +2323,27 @@ def add_verification_code():
     if not expected_key:
         logging.error("FORM_WEBHOOK_KEY environment variable is not set")
         return jsonify({"success": False, "error": "Server configuration error"}), 500
-    api_key = request.json.get('api_key', '')
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
+
+    api_key = payload.get('api_key', '')
+    if not isinstance(api_key, str):
+        api_key = str(api_key)
     if not hmac.compare_digest(api_key, expected_key):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     # รับข้อมูลจาก request
-    code = request.json.get('code', '')
-    full_form_data = request.json.get('full_form_data', {})
+    code = payload.get('code', '')
+    if not isinstance(code, str):
+        code = str(code)
+    code = code.strip()
+
+    full_form_data = payload.get('full_form_data', {})
+    if full_form_data is None:
+        full_form_data = {}
+    if not isinstance(full_form_data, dict):
+        return jsonify({"success": False, "error": "Invalid form data"}), 400
 
     if not code or not code.isdigit() or len(code) != 6:
         return jsonify({"success": False, "error": "Invalid verification code"}), 400
@@ -2349,12 +2379,12 @@ def add_verification_code():
 
         # เริ่ม background thread เพื่อสรุปข้อมูลด้วย AI
         if full_form_data:
-            summary_thread = threading.Thread(
-                target=process_ai_summary_async,
-                args=(code, full_form_data),
-                daemon=True
+            _submit_background_task(
+                'form_summary',
+                process_ai_summary_async,
+                code,
+                full_form_data,
             )
-            summary_thread.start()
             logging.info(f"เริ่ม background thread เพื่อสรุปข้อมูล form สำหรับรหัส: {code}")
 
         # ตอบกลับทันทีโดยไม่ต้องรอ AI summary
@@ -2523,34 +2553,57 @@ scheduler = BackgroundScheduler()
 
 def shutdown_scheduler(wait=True, reason="unknown"):
     """ปิดตัวกำหนดการของ APScheduler อย่างปลอดภัย"""
+    global _scheduler_initialized
     if not scheduler.running:
+        _scheduler_initialized = False
         logging.debug(f"ข้ามการปิดตัวกำหนดการ ({reason}): ยังไม่ได้เริ่มทำงาน")
         return
     try:
         scheduler.shutdown(wait=wait)
+        _scheduler_initialized = False
         logging.info(f"ปิดตัวกำหนดการเรียบร้อย ({reason})")
     except SchedulerNotRunningError:
+        _scheduler_initialized = False
         logging.debug(f"ตัวกำหนดการถูกปิดแล้ว ({reason})")
     except Exception as exc:
         logging.error(f"เกิดข้อผิดพลาดในการปิดตัวกำหนดการ ({reason}): {exc}")
 
 # เพิ่มงานตัวกำหนดการ
 _scheduler_initialized = False
+_FOLLOW_UP_JOB_ID = 'follow_up_dispatch'
+_PROACTIVE_CHECKIN_JOB_ID = 'proactive_checkin'
 
 def init_scheduler():
     global _scheduler_initialized
-    if _scheduler_initialized:
+    if _scheduler_initialized or scheduler.running:
+        _scheduler_initialized = True
         logging.debug("Scheduler already initialized, skipping")
         return
-    _scheduler_initialized = True
-    scheduler.add_job(check_and_send_follow_ups, 'interval', minutes=30)
-    from .services.proactive_checkin import run_proactive_checkins
-    scheduler.add_job(run_proactive_checkins, 'interval', hours=6, id='proactive_checkin')
-    scheduler.start()
-    logging.info("ตัวกำหนดการเริ่มต้นแล้ว: ติดตามทุก 30 นาที, เช็คอินเชิงรุกทุก 6 ชม.")
+    try:
+        scheduler.add_job(
+            check_and_send_follow_ups,
+            'interval',
+            minutes=30,
+            id=_FOLLOW_UP_JOB_ID,
+            replace_existing=True,
+        )
+        from .services.proactive_checkin import run_proactive_checkins
+        scheduler.add_job(
+            run_proactive_checkins,
+            'interval',
+            hours=6,
+            id=_PROACTIVE_CHECKIN_JOB_ID,
+            replace_existing=True,
+        )
+        scheduler.start()
+        _scheduler_initialized = True
+        logging.info("ตัวกำหนดการเริ่มต้นแล้ว: ติดตามทุก 30 นาที, เช็คอินเชิงรุกทุก 6 ชม.")
 
-    # การจัดการการปิดอย่างถูกต้อง
-    atexit.register(lambda: shutdown_scheduler(reason='atexit'))
+        # การจัดการการปิดอย่างถูกต้อง
+        atexit.register(lambda: shutdown_scheduler(reason='atexit'))
+    except Exception:
+        _scheduler_initialized = False
+        raise
 
 # ตัวจัดการการปิดอย่างสง่างาม
 def handle_shutdown(sig=None, frame=None):
@@ -2565,6 +2618,12 @@ def handle_shutdown(sig=None, frame=None):
         logging.info("ปิด AI executor เรียบร้อย")
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการปิด AI executor: {str(e)}")
+
+    try:
+        _BACKGROUND_EXECUTOR.shutdown(wait=False)
+        logging.info("ปิด background executor เรียบร้อย")
+    except Exception as e:
+        logging.error(f"เกิดข้อผิดพลาดในการปิด background executor: {str(e)}")
 
     # ปิดการเชื่อมต่อ Redis
     try:

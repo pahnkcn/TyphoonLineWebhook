@@ -533,6 +533,17 @@ def select_best(
     return best_provider, responses[best_provider], avg_scores[best_provider]
 
 
+def _collect_system_context(messages: List[Dict[str, str]]) -> str:
+    system_parts: List[str] = []
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if content:
+            system_parts.append(content)
+    return "\n\n".join(system_parts)
+
+
 def multi_ai_chat(
     messages: List[Dict[str, str]],
     registry: Optional[ProviderRegistry] = None,
@@ -569,11 +580,7 @@ def multi_ai_chat(
         eval_timeout = EVALUATION_TIMEOUT
 
     # Extract system context and latest user message for evaluation prompt
-    system_context = ""
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_context = msg.get("content", "")
-            break
+    system_context = _collect_system_context(messages)
 
     user_message = ""
     for msg in reversed(messages):

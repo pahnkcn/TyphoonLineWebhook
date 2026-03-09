@@ -12,6 +12,7 @@ services:
       - MYSQL_PORT=3306
       - TZ=Asia/Bangkok
       - ENVIRONMENT=production
+      - ENABLE_SCHEDULER=1
     env_file: .env
     depends_on:
       redis:

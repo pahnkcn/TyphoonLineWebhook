@@ -7,6 +7,19 @@ from flask import request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
+def _get_client_identifier():
+    forwarded_for = request.headers.get('X-Forwarded-For', '')
+    if forwarded_for:
+        forwarded_ip = forwarded_for.split(',', 1)[0].strip()
+        if forwarded_ip:
+            return forwarded_ip
+
+    real_ip = request.headers.get('X-Real-IP', '').strip()
+    if real_ip:
+        return real_ip
+
+    return get_remote_address()
+
 def init_limiter(app):
     """
     เริ่มต้นและตั้งค่า rate limiter สำหรับแอปพลิเคชัน Flask
@@ -21,7 +34,7 @@ def init_limiter(app):
     # เริ่มต้น Limiter
     limiter = Limiter(
         app=app,
-        key_func=lambda: request.headers.get('X-Line-Signature', get_remote_address()),
+        key_func=_get_client_identifier,
         default_limits=["200 per day", "50 per hour"],
         strategy="fixed-window"  # ใช้อัลกอริทึมหน้าต่างคงที่
     )
@@ -30,7 +43,7 @@ def init_limiter(app):
     @app.errorhandler(429)
     def ratelimit_handler(e):
         """จัดการกรณีที่เกินขีดจำกัดการใช้งาน"""
-        logging.warning(f"Rate limit exceeded: {get_remote_address()}")
+        logging.warning(f"Rate limit exceeded: {_get_client_identifier()}")
         return jsonify({
             "error": "rate_limit_exceeded",
             "message": "ขออภัย คุณส่งคำขอมากเกินไป กรุณาลองใหม่ในภายหลัง",
@@ -51,23 +64,16 @@ def get_custom_limiter(redis_client, app=None):
         Limiter: อินสแตนซ์ของตัวจำกัดอัตราที่ใช้ Redis
     """
     try:
-        from flask_limiter.util import get_ipaddr
         from flask_limiter.extension import Limiter
         
         def get_identifier():
             """กำหนดตัวระบุสำหรับ rate limiting"""
             # เลือกใช้ Line User ID ถ้ามี, มิฉะนั้นใช้ IP address
-            line_user_id = request.headers.get('X-Line-User-ID')
+            line_user_id = request.headers.get('X-Line-User-ID', '').strip()
             if line_user_id:
                 return f"line:{line_user_id}"
             
-            # หรือลายเซ็น LINE ถ้ามี
-            line_signature = request.headers.get('X-Line-Signature')
-            if line_signature:
-                return f"linesig:{line_signature}"
-                
-            # กลับไปใช้ตัวระบุ IP เป็นตัวเลือกสุดท้าย
-            return get_ipaddr()
+            return _get_client_identifier()
         
         # สร้าง Limiter ด้วย Redis
         limiter = Limiter(
