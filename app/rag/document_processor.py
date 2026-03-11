@@ -10,6 +10,38 @@ from typing import Dict, Iterable, List, Sequence, Union
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u0E00-\u0E7F]")
 _SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?。！？])\s+")
 _MARKDOWN_HEADING_PATTERN = re.compile(r"(?m)^(#{1,6})\s+(.+)$")
+_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_NOISE_LINE_PATTERNS = (
+    re.compile(r"^\s*source\s*:\s*", flags=re.IGNORECASE),
+    re.compile(r"^\s*table of contents\s*$", flags=re.IGNORECASE),
+    re.compile(r"^\s*contents\s*$", flags=re.IGNORECASE),
+    re.compile(r"^\s*copyright\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*all rights reserved\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*library of congress\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*a cip record\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*isbn\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*printed in\b", flags=re.IGNORECASE),
+    re.compile(r"^\s*cover design\s*:", flags=re.IGNORECASE),
+    re.compile(r"^\s*(?:https?://|www\.)", flags=re.IGNORECASE),
+    re.compile(r"^\s*[ivxlcdm]+\s*$", flags=re.IGNORECASE),
+    re.compile(r"^\s*\d+\s*$"),
+    re.compile(r"^\s*[^A-Za-z\u0E00-\u0E7F]{3,}\s*$"),
+)
+_NOISE_SECTION_TITLES = {
+    "about the authors",
+    "acknowledgements",
+    "acknowledgments",
+    "bibliography",
+    "contents",
+    "contributors",
+    "copyright",
+    "foreword",
+    "index",
+    "library of congress cataloging in publication data",
+    "preface",
+    "table of contents",
+}
 
 
 @dataclass
@@ -32,6 +64,75 @@ def _normalize_text(text: str) -> str:
     lines = [line.strip() for line in str(text or "").splitlines()]
     compact = "\n".join(line for line in lines if line)
     return compact.strip()
+
+
+def _normalize_title(text: str) -> str:
+    lowered = str(text or "").strip().lower()
+    lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _strip_markdown_artifacts(text: str) -> str:
+    stripped = str(text or "").replace("\u00a0", " ")
+    stripped = re.sub(r"&nbsp;?", " ", stripped, flags=re.IGNORECASE)
+    stripped = _MARKDOWN_IMAGE_PATTERN.sub(" ", stripped)
+    stripped = _MARKDOWN_LINK_PATTERN.sub(r"\1", stripped)
+    return stripped
+
+
+def _is_noise_title(title: str) -> bool:
+    return _normalize_title(title) in _NOISE_SECTION_TITLES
+
+
+def _is_noise_line(line: str) -> bool:
+    candidate = str(line or "").strip()
+    if not candidate:
+        return True
+    if any(pattern.search(candidate) for pattern in _NOISE_LINE_PATTERNS):
+        return True
+    if re.search(r"\.{3,}\s*(?:[A-Za-z0-9]+|[ivxlcdm]+)\s*$", candidate, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _sanitize_text(text: str) -> str:
+    stripped = _strip_markdown_artifacts(text)
+    cleaned_lines: List[str] = []
+    for raw_line in stripped.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _is_noise_line(line):
+            continue
+        cleaned_lines.append(line)
+    return _normalize_text("\n".join(cleaned_lines))
+
+
+def _is_low_signal_chunk(content: str) -> bool:
+    cleaned = _normalize_text(content)
+    if not cleaned:
+        return True
+    if _is_noise_line(cleaned):
+        return True
+    token_count = _token_count(cleaned)
+    text_char_count = len(re.findall(r"[A-Za-z\u0E00-\u0E7F]", cleaned))
+    return token_count < 6 and text_char_count < 24
+
+
+def _sanitize_segments(segments: Sequence[DocumentSegment]) -> List[DocumentSegment]:
+    cleaned_segments: List[DocumentSegment] = []
+    for segment in segments:
+        metadata = dict(segment.metadata or {})
+        section_title = str(metadata.get("section_title") or "").strip()
+        if section_title and _is_noise_title(section_title):
+            continue
+        content = _sanitize_text(segment.content)
+        if not content or _is_low_signal_chunk(content):
+            continue
+        if section_title:
+            metadata["section_title"] = _sanitize_text(section_title) or section_title
+        cleaned_segments.append(DocumentSegment(content=content, metadata=metadata))
+    return cleaned_segments
 
 
 def _detect_language(text: str) -> str:
@@ -199,24 +300,26 @@ def load_document_segments(file_path: Union[Path, str]) -> List[DocumentSegment]
     file_path = Path(file_path)
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
-        return load_pdf_segments(file_path)
-    if suffix == ".docx":
-        return load_docx_segments(file_path)
-    if suffix in {".txt", ".md"}:
-        return load_text_segments(file_path)
-    raise ValueError(f"Unsupported document type: {file_path.name}")
+        segments = load_pdf_segments(file_path)
+    elif suffix == ".docx":
+        segments = load_docx_segments(file_path)
+    elif suffix in {".txt", ".md"}:
+        segments = load_text_segments(file_path)
+    else:
+        raise ValueError(f"Unsupported document type: {file_path.name}")
+    return _sanitize_segments(segments)
 
 
 def load_pdf(file_path: Union[Path, str]) -> str:
-    return _join_segments(load_pdf_segments(file_path))
+    return _join_segments(load_document_segments(file_path))
 
 
 def load_docx(file_path: Union[Path, str]) -> str:
-    return _join_segments(load_docx_segments(file_path))
+    return _join_segments(load_document_segments(file_path))
 
 
 def load_text(file_path: Union[Path, str]) -> str:
-    return _join_segments(load_text_segments(file_path))
+    return _join_segments(load_document_segments(file_path))
 
 
 def load_document(file_path: Union[Path, str]) -> str:
@@ -566,15 +669,15 @@ def chunk_document(
         )
 
     results: List[DocumentChunk] = []
-    for global_chunk_index, chunk in enumerate(provisional_chunks):
+    for chunk in provisional_chunks:
         content = str(chunk.content or "").strip()
-        if not content:
+        if not content or _is_low_signal_chunk(content):
             continue
         token_count = _token_count(content)
         metadata = dict(chunk.metadata or {})
         metadata.update(
             {
-                "chunk_index": global_chunk_index,
+                "chunk_index": len(results),
                 "language": _detect_language(content),
                 "char_count": len(content),
                 "token_count": token_count,

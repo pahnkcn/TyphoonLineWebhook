@@ -131,6 +131,6 @@ class TestLoadConfigRagFlag:
                 os.environ.pop(key, None)
             cfg = load_config()
             assert cfg.RAG_EMBEDDING_DIM == 1536
-            assert cfg.RAG_TOP_K == 5
-            assert cfg.RAG_FETCH_K == 24
-            assert cfg.RAG_MAX_CONTEXT_CHARS == 7000
+            assert cfg.RAG_TOP_K == 4
+            assert cfg.RAG_FETCH_K == 36
+            assert cfg.RAG_MAX_CONTEXT_CHARS == 5200

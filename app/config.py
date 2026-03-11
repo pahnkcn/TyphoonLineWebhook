@@ -50,13 +50,13 @@ class Config:
 
     # Retrieval-Augmented Generation (RAG)
     RAG_ENABLED: bool = field(default=True)
-    RAG_MIN_SCORE: float = field(default=0.35)
-    RAG_CHUNK_SIZE: int = field(default=1500)
-    RAG_CHUNK_OVERLAP: int = field(default=200)
+    RAG_MIN_SCORE: float = field(default=0.42)
+    RAG_CHUNK_SIZE: int = field(default=1100)
+    RAG_CHUNK_OVERLAP: int = field(default=120)
     RAG_EMBEDDING_DIM: int = field(default=1536)
-    RAG_TOP_K: int = field(default=5)
-    RAG_FETCH_K: int = field(default=24)
-    RAG_MAX_CONTEXT_CHARS: int = field(default=7000)
+    RAG_TOP_K: int = field(default=4)
+    RAG_FETCH_K: int = field(default=36)
+    RAG_MAX_CONTEXT_CHARS: int = field(default=5200)
 
 def load_config():
     """
@@ -99,13 +99,13 @@ def load_config():
         'MULTI_AI_ENABLED': 'false',
         'MULTI_AI_TIMEOUT': '45',
         'RAG_ENABLED': 'true',
-        'RAG_MIN_SCORE': '0.35',
-        'RAG_CHUNK_SIZE': '1500',
-        'RAG_CHUNK_OVERLAP': '200',
+        'RAG_MIN_SCORE': '0.42',
+        'RAG_CHUNK_SIZE': '1100',
+        'RAG_CHUNK_OVERLAP': '120',
         'RAG_EMBEDDING_DIM': '1536',
-        'RAG_TOP_K': '5',
-        'RAG_FETCH_K': '24',
-        'RAG_MAX_CONTEXT_CHARS': '7000',
+        'RAG_TOP_K': '4',
+        'RAG_FETCH_K': '36',
+        'RAG_MAX_CONTEXT_CHARS': '5200',
     }
     
     for var, default in defaults.items():
@@ -177,13 +177,13 @@ def load_config():
         MULTI_AI_ENABLED=os.getenv('MULTI_AI_ENABLED', 'false').lower() in ('true', '1', 'yes'),
         MULTI_AI_TIMEOUT=int(os.getenv('MULTI_AI_TIMEOUT', '45')),
         RAG_ENABLED=os.getenv('RAG_ENABLED', 'true').lower() in ('true', '1', 'yes'),
-        RAG_MIN_SCORE=float(os.getenv('RAG_MIN_SCORE', '0.35')),
-        RAG_CHUNK_SIZE=int(os.getenv('RAG_CHUNK_SIZE', '1500')),
-        RAG_CHUNK_OVERLAP=int(os.getenv('RAG_CHUNK_OVERLAP', '200')),
+        RAG_MIN_SCORE=float(os.getenv('RAG_MIN_SCORE', '0.42')),
+        RAG_CHUNK_SIZE=int(os.getenv('RAG_CHUNK_SIZE', '1100')),
+        RAG_CHUNK_OVERLAP=int(os.getenv('RAG_CHUNK_OVERLAP', '120')),
         RAG_EMBEDDING_DIM=int(os.getenv('RAG_EMBEDDING_DIM', '1536')),
-        RAG_TOP_K=int(os.getenv('RAG_TOP_K', '5')),
-        RAG_FETCH_K=int(os.getenv('RAG_FETCH_K', '24')),
-        RAG_MAX_CONTEXT_CHARS=int(os.getenv('RAG_MAX_CONTEXT_CHARS', '7000')),
+        RAG_TOP_K=int(os.getenv('RAG_TOP_K', '4')),
+        RAG_FETCH_K=int(os.getenv('RAG_FETCH_K', '36')),
+        RAG_MAX_CONTEXT_CHARS=int(os.getenv('RAG_MAX_CONTEXT_CHARS', '5200')),
     )
 
     logging.info(

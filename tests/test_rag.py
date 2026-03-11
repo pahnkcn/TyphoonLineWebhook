@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import importlib
 from pathlib import Path
@@ -217,6 +218,33 @@ class TestDocumentProcessor:
 
         assert len(doc_chunks) == 2
         assert all(token_count >= 24 for token_count in token_counts)
+
+    def test_chunk_document_strips_markdown_noise_before_embedding(self, tmp_path: Path):
+        doc_path = tmp_path / "noise.md"
+        doc_path.write_text(
+            "\n".join(
+                [
+                    "Source: [NIDA](https://example.com)",
+                    "## Table of Contents",
+                    "Introduction ... ix",
+                    "## Overdose Steps",
+                    "![img-1](img-1.png)",
+                    "Give naloxone and call emergency services immediately.",
+                    "## Related Resources",
+                    "https://example.com/resource",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        doc_chunks = chunk_document(str(doc_path), chunk_size=120, overlap=20)
+
+        assert doc_chunks
+        joined = "\n".join(chunk.content for chunk in doc_chunks)
+        assert "Source:" not in joined
+        assert "Table of Contents" not in joined
+        assert "img-1" not in joined
+        assert "naloxone" in joined
 
 
 class TestEmbeddingClient:
@@ -707,6 +735,36 @@ class TestKnowledgeBase:
         assert len(doc_ids) == 1
         assert doc_ids[0][0] == second["doc_id"]
 
+    def test_ingest_directory_purges_deleted_files_from_index(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
+
+        db = _InMemoryDBManager()
+        keep_doc = tmp_path / "keep.md"
+        remove_doc = tmp_path / "remove.md"
+        keep_doc.write_text("coping plan support network and relapse prevention steps", encoding="utf-8")
+        remove_doc.write_text("obsolete manual text with outdated background guidance", encoding="utf-8")
+
+        kb = KnowledgeBase(
+            db_manager=db,
+            redis_client=None,
+            docs_dir=str(tmp_path),
+            chunk_size=80,
+            overlap=10,
+            embedding_dim=16,
+        )
+
+        first = kb.ingest_directory()
+        assert first["indexed"] == 2
+
+        remove_doc.unlink()
+
+        second = kb.ingest_directory()
+        indexed_names = {str(record.get("doc_name")) for record in kb.vector_store._records}
+
+        assert second["purged"] > 0
+        assert "keep.md" in indexed_names
+        assert "remove.md" not in indexed_names
+
     def test_query_returns_empty_when_embedding_fails(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
 
@@ -788,6 +846,12 @@ class TestKnowledgeBase:
         assert "relapse" in processed
         assert "coping plan" in processed
 
+    def test_preprocess_query_adds_cross_lingual_hints_for_thai_fentanyl_overdose(self):
+        processed = KnowledgeBase._preprocess_query("เพื่อนหมดสติ น่าจะโดนเฟนทานิล ต้องทำยังไง")
+        assert "fentanyl" in processed
+        assert "naloxone" in processed
+        assert "overdose" in processed
+
     def test_query_can_retrieve_english_doc_from_thai_relapse_query(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
 
@@ -838,6 +902,76 @@ class TestKnowledgeBase:
         }
         assert topics.get("miti4_2.md") == "mi_quality"
         assert topics.get("Dtsch_Arztebl_Int-118_0109.md") == "research"
+
+    def test_query_prefers_focused_reference_over_background_reference(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
+
+        db = _InMemoryDBManager()
+        focused_doc = tmp_path / "overdose_and_withdrawal_response.md"
+        background_doc = tmp_path / "emerging_drug_trends.md"
+        focused_doc.write_text(
+            "naloxone overdose slow breathing rescue breathing emergency fentanyl",
+            encoding="utf-8",
+        )
+        background_doc.write_text(
+            "fentanyl trend monitoring naloxone public health surveillance overdose data",
+            encoding="utf-8",
+        )
+
+        kb = KnowledgeBase(
+            db_manager=db,
+            redis_client=None,
+            docs_dir=str(tmp_path),
+            chunk_size=80,
+            overlap=10,
+            embedding_dim=16,
+        )
+        kb.ingest_file(str(focused_doc))
+        kb.ingest_file(str(background_doc))
+
+        result = kb.query_with_sources("นาล็อกโซนช่วยโอเวอร์โดสเฟนทานิลยังไง", top_k=2)
+
+        assert result["sources"]
+        assert result["sources"][0]["doc_name"] == "overdose_and_withdrawal_response.md"
+        assert result["sources"][0]["source_kind"] == "crisis_reference"
+
+    def test_query_limits_duplicate_chunks_from_one_document(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("app.rag.knowledge_base.EmbeddingClient", _FakeEmbeddingClient)
+
+        db = _InMemoryDBManager()
+        relapse_doc = tmp_path / "relapse_and_craving_support.md"
+        treatment_doc = tmp_path / "treatment.md"
+        relapse_doc.write_text(
+            "\n\n".join(
+                [
+                    "## Trigger Map\n" + ("relapse craving trigger coping plan support " * 30).strip(),
+                    "## Urge Surfing\n" + ("urge surfing relapse craving coping step " * 30).strip(),
+                    "## After a Lapse\n" + ("lapse review relapse prevention next step support " * 30).strip(),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        treatment_doc.write_text(
+            "relapse prevention coping plan outpatient support next step treatment referral",
+            encoding="utf-8",
+        )
+
+        kb = KnowledgeBase(
+            db_manager=db,
+            redis_client=None,
+            docs_dir=str(tmp_path),
+            chunk_size=220,
+            overlap=30,
+            embedding_dim=16,
+        )
+        kb.ingest_file(str(relapse_doc))
+        kb.ingest_file(str(treatment_doc))
+
+        result = kb.query_with_sources("need relapse craving coping plan", top_k=3)
+        counts = Counter(source["doc_name"] for source in result["sources"])
+
+        assert counts["relapse_and_craving_support.md"] <= 2
+        assert "treatment.md" in counts
 
 
 class TestIntegration:

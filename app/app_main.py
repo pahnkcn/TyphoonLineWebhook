@@ -286,12 +286,12 @@ try:
             docs_dir=os.path.join(BASE_DIR, 'knowledge_docs'),
             enabled=getattr(config, 'RAG_ENABLED', True),
             auto_ingest=True,
-            chunk_size=getattr(config, 'RAG_CHUNK_SIZE', 1500),
-            overlap=getattr(config, 'RAG_CHUNK_OVERLAP', 200),
-            min_score=getattr(config, 'RAG_MIN_SCORE', 0.35),
+            chunk_size=getattr(config, 'RAG_CHUNK_SIZE', 1100),
+            overlap=getattr(config, 'RAG_CHUNK_OVERLAP', 120),
+            min_score=getattr(config, 'RAG_MIN_SCORE', 0.42),
             embedding_dim=getattr(config, 'RAG_EMBEDDING_DIM', 1536),
-            base_fetch_k=getattr(config, 'RAG_FETCH_K', 24),
-            max_context_chars=getattr(config, 'RAG_MAX_CONTEXT_CHARS', 7000),
+            base_fetch_k=getattr(config, 'RAG_FETCH_K', 36),
+            max_context_chars=getattr(config, 'RAG_MAX_CONTEXT_CHARS', 5200),
         )
         if knowledge_base is not None:
             logging.info("RAG knowledge base initialized: %s", knowledge_base.get_stats())
@@ -1162,7 +1162,7 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
                 rag_topic_hint = "crisis" if pre_risk_level == "high" else None
                 rag_payload = knowledge_base.query_with_sources(
                     user_message,
-                    top_k=getattr(config, 'RAG_TOP_K', 5),
+                    top_k=getattr(config, 'RAG_TOP_K', 4),
                     topic_hint=rag_topic_hint,
                 )
                 rag_context = str(rag_payload.get("context") or "")

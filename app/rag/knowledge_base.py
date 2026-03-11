@@ -20,6 +20,11 @@ _FILLER_PATTERN = re.compile(
     r"\b(?:please|pls|kindly|help|ครับ|ค่ะ|คะ|นะ|หน่อย)\b",
     flags=re.IGNORECASE,
 )
+_LOW_SIGNAL_SECTION_TITLES = {
+    "related resources",
+    "resources",
+    "references",
+}
 
 _TOPIC_EXPANSION_RULES: List[Tuple[Tuple[str, ...], str]] = [
     (
@@ -41,25 +46,35 @@ _TOPIC_EXPANSION_RULES: List[Tuple[Tuple[str, ...], str]] = [
     (
         (
             "overdose",
+            "naloxone",
+            "narcan",
+            "fentanyl",
             "opioid",
             "stimulant",
             "เสพเกินขนาด",
             "โอเวอร์โดส",
             "หมดสติ",
+            "นาล็อกโซน",
+            "เฟนทานิล",
         ),
-        "opioid stimulant emergency referral hospital overdose 1669",
+        "opioid fentanyl naloxone overdose rescue breathing emergency referral hospital 1669",
     ),
     (
         (
             "relapse",
             "lapse",
+            "craving",
+            "urge",
+            "trigger",
             "กลับไปใช้",
             "กลับไปเสพ",
             "ใช้ซ้ำ",
             "เสพซ้ำ",
             "เผลอใช้",
+            "ความอยาก",
+            "ตัวกระตุ้น",
         ),
-        "relapse lapse trigger coping plan prevention recovery",
+        "relapse lapse craving urge trigger coping plan prevention recovery urge surfing",
     ),
     (
         (
@@ -73,15 +88,61 @@ _TOPIC_EXPANSION_RULES: List[Tuple[Tuple[str, ...], str]] = [
     ),
     (
         (
+            "meth",
+            "methamphetamine",
+            "ice",
+            "yaba",
+            "shabu",
+            "ยาบ้า",
+            "เมท",
+        ),
+        "methamphetamine stimulant yaba shabu psychosis contingency management stimulant crash",
+    ),
+    (
+        (
+            "heroin",
+            "เฮโรอีน",
+            "black tar",
+        ),
+        "heroin opioid overdose naloxone withdrawal medication treatment methadone buprenorphine",
+    ),
+    (
+        (
+            "cannabis",
+            "marijuana",
+            "weed",
+            "กัญชา",
+        ),
+        "cannabis marijuana weed thc cbd impairment psychosis motivational support",
+    ),
+    (
+        (
+            "opioids",
+            "opiate",
+            "oxycodone",
+            "ยาแก้ปวด",
+            "โอปิออยด์",
+        ),
+        "opioids opioid overdose naloxone buprenorphine methadone naltrexone withdrawal",
+    ),
+    (
+        (
             "motivational interviewing",
             "change talk",
+            "sustain talk",
+            "ambivalence",
+            "oars",
+            "reflection",
+            "confidence",
             "motivation",
             "readiness",
             "แรงจูงใจ",
             "ความพร้อมเปลี่ยน",
             "สัมภาษณ์เสริมแรงจูงใจ",
+            "ลังเลสองใจ",
+            "ความมั่นใจ",
         ),
-        "motivational interviewing stages of change commitment change talk",
+        "motivational interviewing oars reflection ambivalence readiness confidence change talk sustain talk",
     ),
     (
         (
@@ -119,16 +180,36 @@ _DOC_TOPIC_MAP = {
     "dtsch": "research",
     "evidence": "research",
     "motivational": "mi",
+    "mi_core": "mi",
+    "change_talk": "mi",
+    "quality_checklist": "mi_quality",
+    "evidence_summary": "research",
     "stages": "stages_of_change",
     "harm_reduction": "harm_reduction",
     "cbt": "cbt_dbt",
     "dbt": "cbt_dbt",
     "crisis": "crisis",
     "relapse": "relapse",
+    "craving": "relapse",
+    "overdose": "crisis",
+    "withdrawal": "crisis",
     "family": "family",
     "conversation": "examples",
     "research": "research",
 }
+_SOURCE_PROFILE_RULES: List[Tuple[Tuple[str, ...], Tuple[str, float]]] = [
+    (("overdose", "withdrawal"), ("crisis_reference", 1.12)),
+    (("relapse", "craving"), ("relapse_reference", 1.10)),
+    (("mi_core", "change_talk", "motivational"), ("mi_reference", 1.06)),
+    (("quality_checklist", "miti"), ("mi_quality_reference", 0.97)),
+    (("evidence_summary", "dtsch", "arztebl", "research"), ("evidence_review", 0.97)),
+    (
+        ("fentanyl", "heroin", "methamphetamine", "opioids", "treatment", "prevention", "hiv"),
+        ("focused_reference", 1.03),
+    ),
+    (("emerging", "addiction_science", "psychedelic"), ("background_reference", 0.99)),
+    (("manual", "drugs_a_to_z", "encyclopedia"), ("broad_reference", 0.86)),
+]
 
 
 def _infer_topic(doc_name: str) -> str:
@@ -137,6 +218,14 @@ def _infer_topic(doc_name: str) -> str:
         if pattern in lower:
             return topic
     return "general"
+
+
+def _infer_source_profile(doc_name: str) -> Tuple[str, float]:
+    lower = str(doc_name or "").lower()
+    for patterns, profile in _SOURCE_PROFILE_RULES:
+        if any(pattern in lower for pattern in patterns):
+            return profile
+    return ("general_reference", 1.0)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -171,9 +260,11 @@ class KnowledgeBase:
         self.max_chunk_chars = max(500, int(max_chunk_chars))
         self.lexical_min_score = 0.12
 
-        self.dense_weight = 0.55
+        self.dense_weight = 0.52
         self.lexical_weight = 0.30
-        self.keyword_weight = 0.15
+        self.keyword_weight = 0.18
+        self.max_chunks_per_doc = 2
+        self.doc_reuse_penalty = 0.08
 
         self.embedding_client = EmbeddingClient(
             redis_client=redis_client,
@@ -195,6 +286,13 @@ class KnowledgeBase:
             (doc_name,),
         )
         return [str(row[0]) for row in rows if row and row[0]]
+
+    @staticmethod
+    def _is_path_within_directory(path_value: str, target_dir: Path) -> bool:
+        try:
+            return Path(path_value).resolve().is_relative_to(target_dir.resolve())
+        except Exception:
+            return False
 
     def _document_exists(self, doc_id: str) -> bool:
         rows = self.db_manager.execute_query(
@@ -245,6 +343,7 @@ class KnowledgeBase:
             }
 
         topic = _infer_topic(path.name)
+        source_kind, source_weight = _infer_source_profile(path.name)
         normalized_chunks: List[DocumentChunk] = []
         for chunk in chunks:
             metadata = dict(chunk.metadata or {})
@@ -257,6 +356,8 @@ class KnowledgeBase:
                     "topic": topic,
                     "language": str(metadata.get("language") or "unknown"),
                     "token_count": int(metadata.get("token_count") or 0),
+                    "source_kind": source_kind,
+                    "source_weight": float(source_weight),
                 }
             )
             normalized_chunks.append(DocumentChunk(content=chunk.content, metadata=metadata))
@@ -286,6 +387,25 @@ class KnowledgeBase:
             for path in target.rglob("*")
             if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
         )
+        active_source_paths = {str(path.resolve()) for path in files}
+
+        purged = 0
+        if not force_reindex:
+            stale_doc_names = set()
+            for record in self.vector_store._records:
+                metadata = record.get("metadata") if isinstance(record, dict) else {}
+                metadata = metadata if isinstance(metadata, dict) else {}
+                source_path = str(metadata.get("source_path") or "")
+                doc_name = str(record.get("doc_name") or "")
+                if not source_path or not doc_name:
+                    continue
+                resolved_source_path = str(Path(source_path).resolve())
+                if resolved_source_path in active_source_paths:
+                    continue
+                if self._is_path_within_directory(resolved_source_path, target):
+                    stale_doc_names.add(doc_name)
+            for doc_name in stale_doc_names:
+                purged += int(self.vector_store.delete_by_doc_name(doc_name) or 0)
 
         indexed = 0
         skipped = 0
@@ -307,13 +427,14 @@ class KnowledgeBase:
             "total_files": len(files),
             "indexed": indexed,
             "skipped": skipped,
+            "purged": purged,
             "errors": errors,
             "force_reindex": force_reindex,
         }
 
     @staticmethod
     def _preprocess_query(question: str) -> str:
-        cleaned = _FILLER_PATTERN.sub(" ", (question or "").strip())
+        cleaned = KnowledgeBase._strip_fillers(question)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if not cleaned:
             cleaned = (question or "").strip()
@@ -329,8 +450,12 @@ class KnowledgeBase:
                 seen_expansions.add(expansion)
 
         if len(_tokenize(cleaned)) <= 12 and expansions:
-            cleaned = f"{cleaned} {' '.join(expansions[:3])}".strip()
+            cleaned = f"{cleaned} {' '.join(expansions[:4])}".strip()
         return cleaned
+
+    @staticmethod
+    def _strip_fillers(question: str) -> str:
+        return _FILLER_PATTERN.sub(" ", (question or "").strip())
 
     @staticmethod
     def _keyword_overlap_score(query: str, content: str) -> float:
@@ -357,6 +482,54 @@ class KnowledgeBase:
         return 0.08 if topic == topic_hint else 0.0
 
     @staticmethod
+    def _content_penalty(content: str, metadata: Dict[str, object]) -> float:
+        penalty = 0.0
+        section_title = str(metadata.get("section_title") or "").strip().lower()
+        if section_title in _LOW_SIGNAL_SECTION_TITLES:
+            penalty += 0.06
+        token_count = int(metadata.get("token_count") or 0)
+        if token_count and token_count < 12:
+            penalty += 0.04
+        unique_tokens = len(set(_tokenize(content)))
+        if unique_tokens < 6:
+            penalty += 0.03
+        return penalty
+
+    def _select_diverse_results(
+        self,
+        reranked: List[Tuple[float, float, float, SearchResult]],
+        top_k: int,
+    ) -> List[Tuple[float, float, float, SearchResult]]:
+        selected: List[Tuple[float, float, float, SearchResult]] = []
+        remaining = list(reranked)
+        selected_by_doc: Dict[str, int] = {}
+
+        while remaining and len(selected) < top_k:
+            best_index = -1
+            best_item: Optional[Tuple[float, float, float, SearchResult]] = None
+            best_adjusted = float("-inf")
+
+            for index, item in enumerate(remaining):
+                base_score, dense_norm, lexical_norm, result = item
+                doc_count = selected_by_doc.get(str(result.doc_id), 0)
+                if doc_count >= self.max_chunks_per_doc:
+                    continue
+                adjusted_score = base_score - (self.doc_reuse_penalty * doc_count)
+                if adjusted_score > best_adjusted:
+                    best_adjusted = adjusted_score
+                    best_index = index
+                    best_item = (adjusted_score, dense_norm, lexical_norm, result)
+
+            if best_item is None or best_index < 0:
+                break
+
+            remaining.pop(best_index)
+            selected.append(best_item)
+            selected_by_doc[str(best_item[3].doc_id)] = selected_by_doc.get(str(best_item[3].doc_id), 0) + 1
+
+        return selected
+
+    @staticmethod
     def _normalize_lexical_scores(scores: Dict[Tuple[str, int], float]) -> Dict[Tuple[str, int], float]:
         if not scores:
             return {}
@@ -371,6 +544,7 @@ class KnowledgeBase:
             return {"context": "", "sources": []}
 
         top_k = max(1, int(top_k))
+        base_query = self._strip_fillers(question)
         processed_query = self._preprocess_query(question)
         fetch_k = self._adaptive_fetch_k(processed_query, top_k)
         logging.debug(
@@ -420,7 +594,9 @@ class KnowledgeBase:
             dense_raw = dense_score_map.get(key, -1.0)
             dense_norm = max(0.0, min(1.0, (dense_raw + 1.0) / 2.0))
             lexical_norm = max(0.0, min(1.0, normalized_lexical.get(key, 0.0)))
-            keyword_norm = self._keyword_overlap_score(processed_query, result.content)
+            keyword_norm = self._keyword_overlap_score(base_query or question, result.content)
+            source_weight = float(metadata.get("source_weight") or 1.0)
+            content_penalty = self._content_penalty(result.content, metadata)
 
             combined = (
                 self.dense_weight * dense_norm
@@ -428,6 +604,7 @@ class KnowledgeBase:
                 + self.keyword_weight * keyword_norm
                 + self._topic_boost(metadata, topic_hint=topic_hint)
             )
+            combined = max(0.0, (combined * source_weight) - content_penalty)
 
             if (
                 dense_norm < self.min_score
@@ -442,7 +619,7 @@ class KnowledgeBase:
             return {"context": "", "sources": []}
 
         reranked.sort(key=lambda item: item[0], reverse=True)
-        selected = reranked[:top_k]
+        selected = self._select_diverse_results(reranked, top_k)
 
         context_lines: List[str] = []
         sources: List[Dict[str, object]] = []
@@ -458,6 +635,7 @@ class KnowledgeBase:
             page_end = metadata.get("page_end")
             section_title = str(metadata.get("section_title") or "").strip()
             language = str(metadata.get("language") or "unknown")
+            source_kind = str(metadata.get("source_kind") or "unknown")
 
             location_bits: List[str] = []
             if page_start and page_end and page_start == page_end:
@@ -472,7 +650,7 @@ class KnowledgeBase:
             location_suffix = f", {location_label}" if location_label else ""
 
             line = (
-                f"[{index}] source: {result.doc_name} (score={combined:.3f}, dense={dense_norm:.3f}, lexical={lexical_norm:.3f}{location_suffix}, lang={language})\n"
+                f"[{index}] source: {result.doc_name} (score={combined:.3f}, dense={dense_norm:.3f}, lexical={lexical_norm:.3f}, kind={source_kind}{location_suffix}, lang={language})\n"
                 f"{content}"
             )
             projected_chars = used_chars + len(line) + (2 if context_lines else 0)
@@ -494,6 +672,7 @@ class KnowledgeBase:
                     "page_end": metadata.get("page_end"),
                     "section_title": section_title,
                     "language": language,
+                    "source_kind": source_kind,
                 }
             )
 
