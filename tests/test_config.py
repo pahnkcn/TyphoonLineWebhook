@@ -78,3 +78,17 @@ class TestGetDynamicConfig:
     def test_normal_message_returns_generation_config(self):
         result = get_dynamic_config("สวัสดีครับ")
         assert result == GENERATION_CONFIG
+
+    def test_followup_info_question_uses_recent_context(self):
+        result = get_dynamic_config(
+            "แล้วผลข้างเคียงมีอะไรบ้าง",
+            [
+                {"role": "assistant", "content": "ยาบ้ามีผลต่อหัวใจและการนอน"},
+                {"role": "user", "content": "ยาบ้าคืออะไร"},
+            ],
+        )
+        assert result == INFO_CONFIG
+
+    def test_support_message_not_misclassified_as_info(self):
+        result = get_dynamic_config("ช่วยหน่อย ผมเครียดมาก")
+        assert result == GENERATION_CONFIG

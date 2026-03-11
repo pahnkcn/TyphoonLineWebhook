@@ -1475,6 +1475,33 @@ def _save_multi_ai_log(user_id: str, consensus) -> None:
         logging.warning(f"[multi-ai] Failed to persist consensus log: {e}")
 
 
+def _get_latest_user_message(messages: List[Dict[str, str]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg.get("content", "")
+    return ""
+
+
+def _build_info_grounding_message(has_rag_context: bool) -> Dict[str, str]:
+    if has_rag_context:
+        return {
+            "role": "system",
+            "content": (
+                "คำแนะนำเพิ่มเติมสำหรับคำถามเชิงข้อมูล: ให้ยึดบริบทความรู้จากระบบเป็นหลัก "
+                "สรุปเฉพาะสิ่งที่รองรับได้จากบริบทและการสนทนาปัจจุบัน หลีกเลี่ยงการเติมรายละเอียดเชิงข้อเท็จจริงที่ไม่มีหลักฐานรองรับ "
+                "ถ้าข้อมูลยังไม่พอ ให้บอกอย่างตรงไปตรงมาว่ายังตอบได้ไม่ครบและถามผู้ใช้เพิ่มเพียงหนึ่งประเด็น"
+            ),
+        }
+
+    return {
+        "role": "system",
+        "content": (
+            "คำแนะนำเพิ่มเติมสำหรับคำถามเชิงข้อมูล: หากไม่มีข้อมูลที่ยืนยันได้เพียงพอ อย่าคาดเดาหรือแต่งข้อเท็จจริงเฉพาะเจาะจง "
+            "ให้ตอบอย่างระมัดระวัง ระบุความไม่แน่ใจสั้นๆ และถามผู้ใช้เพิ่มเพียงหนึ่งประเด็นเมื่อจำเป็น"
+        ),
+    }
+
+
 def generate_ai_response_with_timeout(
     messages: List[Dict[str, str]],
     timeout: int = 30,
@@ -1497,6 +1524,21 @@ def generate_ai_response_with_timeout(
     else:
         api_messages = [SYSTEM_MESSAGE_CORE] + list(filtered_messages)
 
+    user_message = _get_latest_user_message(filtered_messages)
+
+    if risk_level == 'high':
+        logging.info("Using CRISIS_CONFIG based on assess_risk result")
+        dynamic_config = CRISIS_CONFIG
+    else:
+        dynamic_config = get_dynamic_config(user_message, filtered_messages)
+
+    if dynamic_config == INFO_CONFIG:
+        grounding_message = _build_info_grounding_message(bool(rag_context and rag_context.strip()))
+        if api_messages and api_messages[0].get("role") == "system":
+            api_messages.insert(1, grounding_message)
+        else:
+            api_messages.insert(0, grounding_message)
+
     if rag_context and rag_context.strip():
         rag_message = {
             "role": "system",
@@ -1514,19 +1556,6 @@ def generate_ai_response_with_timeout(
             api_messages.insert(0, rag_message)
 
     effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
-
-    # เลือก config: ถ้า risk_level == 'high' ใช้ CRISIS_CONFIG โดยตรง (ไม่ต้อง keyword match ซ้ำ)
-    if risk_level == 'high':
-        logging.info("Using CRISIS_CONFIG based on assess_risk result")
-        dynamic_config = CRISIS_CONFIG
-    else:
-        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
-        user_message = ""
-        for msg in reversed(filtered_messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-        dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
     # --- Multi-AI Consensus Mode ---
     if getattr(config, 'MULTI_AI_ENABLED', False):

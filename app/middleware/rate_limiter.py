@@ -3,20 +3,39 @@
 ช่วยป้องกันการใช้งานบริการมากเกินไปและป้องกันการโจมตี DDoS
 """
 import logging
+import os
+import ipaddress
 from flask import request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-def _get_client_identifier():
-    forwarded_for = request.headers.get('X-Forwarded-For', '')
-    if forwarded_for:
-        forwarded_ip = forwarded_for.split(',', 1)[0].strip()
-        if forwarded_ip:
-            return forwarded_ip
+def _should_trust_proxy_headers() -> bool:
+    trust_proxy_env = os.getenv('TRUST_PROXY_HEADERS', '').strip().lower()
+    if trust_proxy_env in {'1', 'true', 'yes'}:
+        return True
 
-    real_ip = request.headers.get('X-Real-IP', '').strip()
-    if real_ip:
-        return real_ip
+    remote_addr = (get_remote_address() or '').strip()
+    if not remote_addr:
+        return False
+
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return False
+
+    return remote_ip.is_loopback or remote_ip.is_private
+
+def _get_client_identifier():
+    if _should_trust_proxy_headers():
+        forwarded_for = request.headers.get('X-Forwarded-For', '')
+        if forwarded_for:
+            forwarded_ip = forwarded_for.split(',', 1)[0].strip()
+            if forwarded_ip:
+                return forwarded_ip
+
+        real_ip = request.headers.get('X-Real-IP', '').strip()
+        if real_ip:
+            return real_ip
 
     return get_remote_address()
 

@@ -5,6 +5,7 @@ import app.session_manager as session_manager
 from app.services.context_manager import (
     chunk_conversation_history,
     filter_messages_for_api,
+    optimize_context,
 )
 
 
@@ -122,3 +123,57 @@ class TestHybridContextManagement:
 
         assert result == expected
         mock_optimize.assert_called_once_with("user-1", mock_config, None, max_tokens=123)
+
+
+class TestOptimizeContext:
+    def test_preserves_system_messages_and_important_turns(self):
+        mock_config = MagicMock()
+        history = [
+            {"role": "system", "content": "base system"},
+            {"role": "system", "content": "บริบทผู้ใช้จากแบบประเมิน:\nuser context"},
+            {"role": "user", "content": "สวัสดี"},
+            {"role": "assistant", "content": "สวัสดีครับ"},
+            {"role": "user", "content": "ช่วงนี้เครียดมาก"},
+            {"role": "assistant", "content": "ขอบคุณที่เล่าให้ฟังนะครับ"},
+            {"role": "user", "content": "ช่วยผมวางแผนหน่อย"},
+            {"role": "assistant", "content": "ได้ครับ เรามาค่อยๆ วางแผนกัน"},
+        ]
+
+        with patch("app.services.context_manager.get_session_token_count", return_value=999999), \
+             patch("app.services.context_manager.get_chat_session", return_value=history), \
+             patch("app.services.context_manager.summarize_conversation_history", return_value="summary") as mock_summary, \
+             patch("app.services.context_manager.save_chat_session") as mock_save:
+            result = optimize_context("user-1", mock_config, None, max_tokens=100, keep_recent=1)
+
+        assert result[0] == {"role": "system", "content": "base system"}
+        assert result[1]["content"].startswith("บริบทผู้ใช้จากแบบประเมิน:")
+        assert any(msg["role"] == "system_summary" and "summary" in msg["content"] for msg in result)
+        assert {"role": "user", "content": "ช่วงนี้เครียดมาก"} in result
+        assert {"role": "assistant", "content": "ขอบคุณที่เล่าให้ฟังนะครับ"} in result
+        assert {"role": "user", "content": "ช่วยผมวางแผนหน่อย"} in result
+        assert {"role": "assistant", "content": "ได้ครับ เรามาค่อยๆ วางแผนกัน"} in result
+        assert {"role": "user", "content": "สวัสดี"} not in result
+        mock_summary.assert_called_once()
+        mock_save.assert_called_once_with("user-1", result)
+
+    def test_keeps_existing_summary_when_no_new_summary_is_needed(self):
+        mock_config = MagicMock()
+        history = [
+            {"role": "system", "content": "base system"},
+            {"role": "system_summary", "content": "existing summary"},
+            {"role": "user", "content": "ช่วงนี้เครียดมาก"},
+            {"role": "assistant", "content": "ขอบคุณที่เล่าให้ฟังนะครับ"},
+            {"role": "user", "content": "ผมกังวลมากเรื่องการกลับไปใช้ยา"},
+            {"role": "assistant", "content": "ได้ครับ"},
+            {"role": "user", "content": "ตกลงครับ"},
+            {"role": "assistant", "content": "ผมอยู่ตรงนี้เสมอ"},
+        ]
+
+        with patch("app.services.context_manager.get_session_token_count", return_value=999999), \
+             patch("app.services.context_manager.get_chat_session", return_value=history), \
+             patch("app.services.context_manager.summarize_conversation_history") as mock_summary, \
+             patch("app.services.context_manager.save_chat_session"):
+            result = optimize_context("user-1", mock_config, None, max_tokens=100, keep_recent=1)
+
+        assert {"role": "system_summary", "content": "existing summary"} in result
+        mock_summary.assert_not_called()

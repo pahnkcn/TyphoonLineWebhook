@@ -5,9 +5,11 @@
 import os
 import sys
 import logging
+import re
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from typing import Optional
+from .risk_assessment import assess_risk
 
 # โหลดตัวแปรสภาพแวดล้อม
 load_dotenv()
@@ -808,6 +810,107 @@ TOKEN_THRESHOLD = 600000
 MAX_CONTEXT_WINDOW = int(2000000 * 0.9)  # 1,800,000 tokens
 
 
+_INFO_REQUEST_PATTERNS = (
+    re.compile(r"(?:คืออะไร|หมายถึงอะไร|หมายความว่า|แปลว่า|อธิบาย|ขอข้อมูล|ข้อมูล|รายละเอียด|ผลข้างเคียง|อาการ|วิธี(?:การ)?|ขั้นตอน|สาเหตุ|รักษาอย่างไร|ป้องกันอย่างไร|ต่างกันอย่างไร|ข้อดีข้อเสีย|ข้อควรระวัง)"),
+    re.compile(r"(?:what is|what are|explain|tell me about|side effects?|symptoms?|how to|difference between|treatment|withdrawal)", re.IGNORECASE),
+)
+_INFO_DOMAIN_TERMS = (
+    "ยา",
+    "สาร",
+    "สารเสพติด",
+    "ยาบ้า",
+    "ไอซ์",
+    "กัญชา",
+    "เหล้า",
+    "บุหรี่",
+    "ถอนยา",
+    "บำบัด",
+    "รักษา",
+    "relapse",
+    "overdose",
+    "withdrawal",
+    "craving",
+    "treatment",
+    "symptom",
+    "side effect",
+)
+_INFO_FOLLOW_UP_TERMS = (
+    "แล้ว",
+    "เพิ่มเติม",
+    "อีก",
+    "ต่อ",
+    "อันนี้",
+    "แบบนี้",
+    "กรณีนี้",
+    "นั้น",
+    "พวกนี้",
+    "มีอะไรบ้าง",
+)
+_SUPPORT_DISCLOSURE_TERMS = (
+    "รู้สึก",
+    "เครียด",
+    "กังวล",
+    "ไม่ไหว",
+    "อยากกลับไปใช้",
+    "อยากเสพ",
+    "อยากใช้ยา",
+    "ช่วยหน่อย",
+    "รับมือ",
+)
+
+
+def _normalize_intent_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _contains_any_term(text: str, terms) -> bool:
+    return any(term in text for term in terms)
+
+
+def _matches_any_pattern(text: str, patterns) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _recent_conversation_excerpt(conversation_history: list = None, max_messages: int = 4) -> str:
+    if not conversation_history:
+        return ""
+
+    recent_parts = []
+    for message in reversed(conversation_history[-max_messages:]):
+        if not isinstance(message, dict):
+            continue
+        content = _normalize_intent_text(str(message.get("content", "")))
+        if content:
+            recent_parts.append(content)
+    recent_parts.reverse()
+    return " ".join(recent_parts)
+
+
+def _is_information_request(user_message: str, conversation_history: list = None) -> bool:
+    normalized_message = _normalize_intent_text(user_message)
+    if not normalized_message:
+        return False
+
+    direct_info_request = _matches_any_pattern(normalized_message, _INFO_REQUEST_PATTERNS)
+    has_domain_terms = _contains_any_term(normalized_message, _INFO_DOMAIN_TERMS)
+    has_support_disclosure = _contains_any_term(normalized_message, _SUPPORT_DISCLOSURE_TERMS)
+    has_follow_up_terms = _contains_any_term(normalized_message, _INFO_FOLLOW_UP_TERMS)
+    has_question_signal = any(marker in normalized_message for marker in ("?", "ไหม", "มั้ย", "หรือเปล่า"))
+
+    if direct_info_request and has_domain_terms and not has_support_disclosure:
+        return True
+
+    if any(keyword in normalized_message for keyword in ("คืออะไร", "what is", "อธิบาย", "explain")):
+        return True
+
+    recent_excerpt = _recent_conversation_excerpt(conversation_history)
+    if recent_excerpt and has_follow_up_terms and (direct_info_request or has_domain_terms or has_question_signal):
+        if _contains_any_term(recent_excerpt, _INFO_DOMAIN_TERMS) or _matches_any_pattern(recent_excerpt, _INFO_REQUEST_PATTERNS):
+            return True
+
+    return False
+
+
 def get_dynamic_config(user_message: str, conversation_history: list = None) -> dict:
     """
     เลือก config ที่เหมาะสมตามบริบทของข้อความ
@@ -819,46 +922,15 @@ def get_dynamic_config(user_message: str, conversation_history: list = None) -> 
     Returns:
         dict: Configuration dictionary ที่เหมาะสม
     """
-    # คำสำคัญสำหรับสถานการณ์วิกฤต
-    crisis_keywords = [
-        'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย', 'ไม่อยากมีชีวิต',
-        'overdose', 'เกินขนาด', 'ก้าวร้าว', 'ทำร้ายคน',
-        'ฆ่า', 'หมดหวัง', 'ไม่มีทางออก', 'จบชีวิต'
-    ]
-    crisis_keywords.extend([
-        'ฆ่าตัวตาย',
-        'ทำร้ายตัวเอง',
-        'อยากตาย',
-        'ไม่อยากมีชีวิต',
-        'suicide',
-        'self-harm',
-    ])
-
-    # เธเธณเธชเธณเธเธฑเธเธชเธณเธซเธฃเธฑเธเธเธฒเธฃเธเธญเธเนเธญเธกเธนเธฅ
-    info_keywords = [
-        'คืออะไร', 'อธิบาย', 'ข้อมูล', 'รายละเอียด',
-        'ผลข้างเคียง', 'อาการ', 'วิธีการ', 'ขั้นตอน',
-        'ยาอะไร', 'สารอะไร', 'เสพติดชนิดไหน', 'ความรู้',
-        'บอกหน่อย', 'แนะนำหน่อย', 'ช่วยอธิบาย'
-    ]
-    info_keywords.extend([
-        'คืออะไร',
-        'อธิบาย',
-        'ข้อมูล',
-        'ยาบ้า',
-        'what is',
-        'explain',
-    ])
-
-    message_lower = user_message.lower()
+    risk_level, _ = assess_risk(user_message)
 
     # ตรวจสอบวิกฤต (ลำดับความสำคัญสูงสุด)
-    if any(keyword in message_lower for keyword in crisis_keywords):
+    if risk_level == 'high':
         logging.info("Detected crisis keywords - using CRISIS_CONFIG")
         return CRISIS_CONFIG
 
     # ตรวจสอบการขอข้อมูล
-    if any(keyword in message_lower for keyword in info_keywords):
+    if _is_information_request(user_message, conversation_history):
         logging.info("Detected information request - using INFO_CONFIG")
         return INFO_CONFIG
 

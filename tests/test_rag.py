@@ -925,6 +925,50 @@ class TestIntegration:
             if msg.get("role") == "system"
         )
 
+    def test_generate_ai_response_injects_info_grounding_without_rag(self, monkeypatch):
+        from app.database_manager import DatabaseManager
+
+        monkeypatch.setattr(DatabaseManager, "_wait_for_database", lambda self, max_wait_time=60, retry_interval=2: None)
+        app_main = importlib.import_module("app.app_main")
+
+        captured = {}
+
+        def fake_send_chat(*, messages, model=None, **kwargs):
+            _ = model, kwargs
+            captured["messages"] = messages
+            return "ok-response"
+
+        class _Counter:
+            def count_message_tokens(self, messages):
+                _ = messages
+                return 90
+
+            def count_tokens(self, text):
+                _ = text
+                return 15
+
+        monkeypatch.setattr(app_main.config, "MULTI_AI_ENABLED", False, raising=False)
+        monkeypatch.setattr(app_main, "token_counter", _Counter())
+        monkeypatch.setattr(app_main, "track_grok_call", lambda **kwargs: None)
+        monkeypatch.setattr(app_main._xai_circuit_breaker, "call", lambda func, **kwargs: func(**kwargs))
+        monkeypatch.setattr(app_main.grok_client, "send_chat", fake_send_chat)
+
+        app_main.generate_ai_response_with_timeout(
+            [{"role": "user", "content": "ยาบ้าคืออะไร"}],
+            timeout=10,
+            user_id="u-test",
+            rag_context=None,
+        )
+
+        assert any(
+            msg.get("role") == "system" and "คำแนะนำเพิ่มเติมสำหรับคำถามเชิงข้อมูล" in msg.get("content", "")
+            for msg in captured["messages"]
+        )
+        assert any(
+            msg.get("role") == "system" and "อย่าคาดเดา" in msg.get("content", "")
+            for msg in captured["messages"]
+        )
+
 
 class TestKnowledgeBaseInit:
     def test_init_knowledge_base_disabled_returns_none(self):

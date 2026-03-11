@@ -544,6 +544,18 @@ def _collect_system_context(messages: List[Dict[str, str]]) -> str:
     return "\n\n".join(system_parts)
 
 
+def _cooldown_before_evaluation(timeout: float, total_start: float) -> float:
+    if timeout <= 0:
+        return 1.5
+
+    elapsed_seconds = max(0.0, time.time() - total_start)
+    remaining_budget = max(0.0, timeout - elapsed_seconds)
+    if remaining_budget <= 1.0:
+        return 0.0
+
+    return min(1.5, max(0.0, remaining_budget * 0.1, 0.15))
+
+
 def multi_ai_chat(
     messages: List[Dict[str, str]],
     registry: Optional[ProviderRegistry] = None,
@@ -642,8 +654,9 @@ def multi_ai_chat(
             provider_times=provider_times,
         )
 
-    # Cooldown between phases to avoid provider rate limits (e.g. Gemini 429)
-    time.sleep(1.5)
+    cooldown_seconds = _cooldown_before_evaluation(timeout, total_start)
+    if cooldown_seconds > 0:
+        time.sleep(cooldown_seconds)
 
     # Phase 2: Cross-Evaluation
     eval_start = time.time()
