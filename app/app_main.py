@@ -429,6 +429,7 @@ def is_user_registered(user_id):
 
 def register_user_with_code(user_id, code):
     """ยืนยันการลงทะเบียนด้วยรหัสยืนยันและโหลดบริบทผู้ใช้"""
+    cache_key = f"registered:{user_id}"
     try:
         # ตรวจสอบว่ารหัสมีอยู่และยังไม่หมดอายุ
         query = 'SELECT code, form_data FROM registration_codes WHERE code = %s AND status = %s'
@@ -2048,6 +2049,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             )
             return True
 
+        cache_key = f"registered:{user_id}"
         try:
             skip_code = 'SKIP' + ''.join(random.choices(string.digits, k=6))
 
@@ -2069,6 +2071,12 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             )
 
             logging.info(f"ผู้ใช้ {user_id} ข้ามการยืนยันตัวตนด้วยคำสั่ง /skipverify (code: {skip_code})")
+
+            # Invalidate registration cache so subsequent checks see the new status immediately
+            try:
+                redis_client.setex(cache_key, 300, '1')
+            except Exception:
+                pass
 
             send_final_response(
                 user_id,
