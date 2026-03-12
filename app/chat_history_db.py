@@ -37,6 +37,37 @@ class ChatHistoryDB:
         logging.info("ChatHistoryDB initialized with enhanced database manager")
 
     @safe_db_operation
+    def save_conversation(self, user_id: str, user_message: str, bot_response: str,
+                          token_count: int = 0, important: bool = False) -> int:
+        """
+        บันทึกการสนทนาลงฐานข้อมูล
+
+        Args:
+            user_id: LINE User ID
+            user_message: ข้อความของผู้ใช้
+            bot_response: ข้อความตอบกลับของบอท
+            token_count: จำนวนโทเค็นที่ใช้
+            important: ข้อความสำคัญหรือไม่
+
+        Returns:
+            int: ID ของแถวที่เพิ่มใหม่
+        """
+        query = '''
+            INSERT INTO conversations (user_id, timestamp, user_message, bot_response, token_count, important_flag)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        '''
+        try:
+            row_id = self.db.execute_and_get_last_id(
+                query,
+                (user_id, datetime.now(), user_message, bot_response, token_count, important)
+            )
+            logging.debug(f"Saved conversation for user {user_id}, id={row_id}")
+            return row_id
+        except Exception as e:
+            logging.error(f"Error saving conversation: {str(e)}")
+            raise
+
+    @safe_db_operation
     def get_user_history(self, user_id: str, max_tokens: int = 100000) -> List[Tuple]:
         """
         ดึงประวัติการสนทนาของผู้ใช้แบบเหมาะสมด้วยประสิทธิภาพที่ดีขึ้น

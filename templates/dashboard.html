@@ -192,7 +192,7 @@ const pctFmt=new Intl.NumberFormat('th-TH',{style:'percent',maximumFractionDigit
 const shortDate=new Intl.DateTimeFormat('th-TH',{day:'numeric',month:'short'});
 const fullDT=new Intl.DateTimeFormat('th-TH',{dateStyle:'medium',timeStyle:'short',hour12:false});
 const decCache={};
-const riskMeta={high:{label:'à¸£à¸°à¸”à¸±à¸šà¸ªà¸¹à¸‡',color:'#ef4444'},medium:{label:'à¸£à¸°à¸§à¸±à¸‡',color:'#f97316'},general:{label:'à¸—à¸±à¹ˆà¸§à¹„à¸›',color:'#22c55e'},contextual:{label:'à¸šà¸£à¸´à¸šà¸—',color:'#0ea5e9'},unknown:{label:'à¹„à¸¡à¹ˆà¸£à¸°à¸šà¸¸',color:'#94a3b8'}};
+const riskMeta={high:{label:'ระดับสูง',color:'#ef4444'},medium:{label:'ระวัง',color:'#f97316'},general:{label:'ทั่วไป',color:'#22c55e'},contextual:{label:'บริบท',color:'#0ea5e9'},unknown:{label:'ไม่ระบุ',color:'#94a3b8'}};
 const lookbackOpts=[7,14,30,60,90,180];
 const userLimitOpts=[5,10,15,20,30];
 const kwLimitOpts=[5,10,15,20,30];
@@ -274,7 +274,7 @@ function ChartTrend({entries}){
   const sum=entries.reduce((a,e)=>a+(Number(e.total_messages)||0),0);
   const sumImp=entries.reduce((a,e)=>a+(Number(e.important_messages)||0),0);
   return html`<div>
-    <div className="viz-metrics"><div className="vm"><span>ข้อความรวม</span><strong>${fmtN(sum)}</strong></div><div className="vm"><span>à¸ªà¸³à¸„à¸±à¸</span><strong>${fmtN(sumImp)}</strong></div><div className="vm"><span>สัดส่วน</span><strong>${fmtP(sum?sumImp/sum:0)}</strong></div></div>
+    <div className="viz-metrics"><div className="vm"><span>ข้อความรวม</span><strong>${fmtN(sum)}</strong></div><div className="vm"><span>สำคัญ</span><strong>${fmtN(sumImp)}</strong></div><div className="vm"><span>สัดส่วน</span><strong>${fmtP(sum?sumImp/sum:0)}</strong></div></div>
     <div className="viz-canvas"><canvas ref=${ref} /></div></div>`;
 }
 
