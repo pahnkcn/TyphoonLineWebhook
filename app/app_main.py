@@ -380,7 +380,6 @@ from .services.context_manager import (
     summarize_conversation_history as _ctx_summarize_history,
     summarize_by_topic as _ctx_summarize_by_topic,
     filter_messages_for_api,
-    optimize_context,
 )
 
 
@@ -388,10 +387,6 @@ def summarize_conversation_chunk(chunk):
     """สรุปส่วนของประวัติการสนทนา — delegates to services.context_manager"""
     return _ctx_summarize_chunk(chunk, config)
 
-
-def process_and_optimize_history(user_id, max_tokens=450000):
-    """ประมวลผลและปรับปรุงประวัติการสนทนา — delegates to services.context_manager"""
-    return optimize_context(user_id, config, db, max_tokens=max_tokens)
 
 
 def summarize_conversation_history(history):
@@ -1052,7 +1047,7 @@ def _send_token_threshold_warning(user_id: str):
                 "📊 ข้อควรทราบ: ประวัติการสนทนาของเรากำลังเติบโต ระบบอาจจะต้องสรุปบางส่วน"
                 "ในการสนทนาต่อไปเพื่อรักษาประสิทธิภาพ\n\n"
                 f"• โทเค็นในเซสชันปัจจุบัน: {session_token_count:,} จาก {TOKEN_THRESHOLD:,} ({(session_token_count/TOKEN_THRESHOLD*100):.1f}%)\n"
-                "• คุณสามารถใช้คำสั่ง /optimize เพื่อปรับปรุงประวัติการสนทนาได้ทุกเมื่อ"
+                "• ระบบจะปรับปรุงประวัติการสนทนาให้อัตโนมัติเมื่อจำเป็น"
             )
             redis_client.setex(f"token_warning:{user_id}", 1800, "1")
             time.sleep(3)
@@ -2076,19 +2071,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
 
     response_text = None
 
-    if normalized == '/optimize':
-        token_count_before = get_session_token_count(user_id)
-        hybrid_context_management(user_id, TOKEN_THRESHOLD)
-        token_count_after = get_session_token_count(user_id)
-
-        response_text = (
-            f"🔄 ปรับปรุงประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
-            f"จำนวนโทเค็น: {token_count_before} → {token_count_after} ({(token_count_before - token_count_after)} ลดลง)\n\n"
-            "ประวัติการสนทนาสำคัญยังคงถูกเก็บไว้ และบอทยังเข้าใจบริบทการสนทนาของเรา\n"
-            "เราสามารถสนทนาต่อได้ตามปกติครับ"
-        )
-
-    elif normalized == '/tokens':
+    if normalized == '/tokens':
         token_count = get_session_token_count(user_id)
         max_tokens = TOKEN_THRESHOLD
         percentage = (token_count / max_tokens) * 100 if max_tokens else 0
@@ -2098,7 +2081,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             f"โทเค็นในเซสชันปัจจุบัน: {token_count:,}\n"
             f"ขีดจำกัด: {max_tokens:,}\n"
             f"เปอร์เซ็นต์การใช้งาน: {percentage:.1f}%\n\n"
-            f"{'⚠️ ใกล้ถึงขีดจำกัด โปรดใช้ /optimize เพื่อปรับปรุงประวัติ' if percentage > 80 else '✅ อยู่ในเกณฑ์ปกติ'}"
+            f"{'⚠️ ใกล้ถึงขีดจำกัด ระบบจะปรับปรุงประวัติให้อัตโนมัติ' if percentage > 80 else '✅ อยู่ในเกณฑ์ปกติ'}"
         )
 
     elif normalized == '/followup':
@@ -2115,7 +2098,6 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             "🛠️ คำสั่งที่มีให้ใช้:\n"
             "📥 /register - วิธีลงทะเบียนใช้งาน\n"
             "✅ /verify <รหัส> - ยืนยันตัวตนด้วยรหัส 6 หลัก\n"
-            "🧠 /optimize - ปรับปรุงประวัติการสนทนาให้มีประสิทธิภาพ\n"
             "🪙 /tokens - ตรวจสอบการใช้งานโทเค็นในเซสชันปัจจุบัน\n"
             "📊 /status - ดูสรุปสถานะการสนทนาและการใช้โทเค็น\n"
             "📈 /progress - ดูรายงานความก้าวหน้าและแนวทางถัดไป\n"

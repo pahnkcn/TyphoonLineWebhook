@@ -244,7 +244,6 @@ These commands are currently handled in `app/app_main.py`.
 | `/context` | Show context imported from the registration form |
 | `/followup` | Show follow-up status |
 | `/tokens` | Show current session token usage |
-| `/optimize` | Compress or optimize session context |
 | `/privacy` | Show the privacy policy |
 | `/deletedata` | Delete the user's stored data |
 | `/emergency` | Show urgent care and hotline information |
