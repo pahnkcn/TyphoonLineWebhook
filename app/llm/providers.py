@@ -59,13 +59,6 @@ PROVIDER_DEFINITIONS: List[Dict] = [
         "model_env": "OPENAI_MODEL",
     },
     {
-        "name": "claude",
-        "api_key_env": "ANTHROPIC_API_KEY",
-        "base_url": "https://api.anthropic.com/v1/",
-        "default_model": "claude-sonnet-4-5-20250514",
-        "model_env": "ANTHROPIC_MODEL",
-    },
-    {
         "name": "gemini",
         "api_key_env": "GEMINI_API_KEY",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
