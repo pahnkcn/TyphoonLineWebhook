@@ -17,8 +17,9 @@ load_dotenv()
 
 # ตั้งค่า logging พร้อมหมุนไฟล์
 os.makedirs('logs', exist_ok=True)
+_log_level_name = os.getenv('LOG_LEVEL', 'INFO').strip().upper()
 logging.basicConfig(
-    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
+    level=getattr(logging, _log_level_name, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         RotatingFileHandler('logs/wsgi.log', maxBytes=5 * 1024 * 1024, backupCount=3),
@@ -52,8 +53,6 @@ if __name__ == "__main__":
     
     # กำหนดพอร์ตจากตัวแปรสภาพแวดล้อมหรือใช้ค่าเริ่มต้น
     port = int(os.getenv('PORT', 5000))
-    
-    init_scheduler()
-    
+
     logging.info(f"เริ่มต้นเซิร์ฟเวอร์ Waitress บนพอร์ต {port}")
     serve(app, host='0.0.0.0', port=port)

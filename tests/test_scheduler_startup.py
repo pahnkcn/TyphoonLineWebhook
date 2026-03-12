@@ -1,4 +1,5 @@
 import importlib
+import runpy
 import sys
 from types import ModuleType
 from unittest.mock import Mock
@@ -55,6 +56,26 @@ def _import_wsgi(monkeypatch, enable_scheduler=None):
     return module, init_scheduler
 
 
+def _run_wsgi_as_main(monkeypatch, enable_scheduler=None):
+    init_scheduler = Mock()
+    serve = Mock()
+    fake_app_module = ModuleType("app.app_main")
+    fake_app_module.app = object()
+    fake_app_module.init_scheduler = init_scheduler
+    fake_waitress_module = ModuleType("waitress")
+    fake_waitress_module.serve = serve
+
+    monkeypatch.setitem(sys.modules, "app.app_main", fake_app_module)
+    monkeypatch.setitem(sys.modules, "waitress", fake_waitress_module)
+    monkeypatch.delenv("ENABLE_SCHEDULER", raising=False)
+    if enable_scheduler is not None:
+        monkeypatch.setenv("ENABLE_SCHEDULER", enable_scheduler)
+
+    sys.modules.pop("wsgi", None)
+    runpy.run_module("wsgi", run_name="__main__")
+    return init_scheduler, serve
+
+
 def test_wsgi_skips_scheduler_autostart_by_default(monkeypatch):
     module, init_scheduler = _import_wsgi(monkeypatch)
 
@@ -67,6 +88,24 @@ def test_wsgi_autostarts_scheduler_when_enabled(monkeypatch):
 
     init_scheduler.assert_called_once_with()
     assert module.application is module.app
+
+
+def test_wsgi_invalid_log_level_falls_back_to_info(monkeypatch):
+    module, init_scheduler = _import_wsgi(monkeypatch)
+
+    monkeypatch.setenv("LOG_LEVEL", "not-a-real-level")
+    sys.modules.pop("wsgi", None)
+    module = importlib.import_module("wsgi")
+
+    init_scheduler.assert_not_called()
+    assert module.application is module.app
+
+
+def test_wsgi_direct_run_does_not_double_start_scheduler(monkeypatch):
+    init_scheduler, serve = _run_wsgi_as_main(monkeypatch, "1")
+
+    init_scheduler.assert_called_once_with()
+    serve.assert_called_once()
 
 
 def test_init_scheduler_registers_jobs_once(monkeypatch, app_main_module):
