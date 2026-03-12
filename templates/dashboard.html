@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="th">
 <head>
   <meta charset="utf-8" />
@@ -40,6 +40,14 @@
     .filter-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-top:16px}
     .field{display:flex;flex-direction:column;gap:6px;font-size:.9rem}
     .field span{color:var(--text-muted);font-weight:500}
+    .field input{border-radius:12px;border:1px solid var(--border-strong);padding:9px 14px;font-size:.95rem;background:var(--surface-strong);color:var(--text-primary)}
+    .field input:focus{outline:none;border-color:rgba(99,102,241,.8);box-shadow:0 0 0 3px rgba(99,102,241,.18)}
+    .panel{margin-top:16px;padding:16px;border-radius:18px;border:1px solid rgba(148,163,184,.2);background:var(--card-bg)}
+    .panel-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px}
+    .action-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .helper{font-size:.82rem;color:var(--text-muted)}
+    .checkline{display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--text-muted);padding-top:28px}
+    .checkline input{width:auto;padding:0;margin:0}
     .ghost-btn{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 16px;border:1px solid rgba(248,250,252,.35);color:inherit;background:rgba(255,255,255,.12);font-weight:500;font-size:.9rem;transition:all .2s}
     .ghost-btn:hover:not(:disabled){background:rgba(255,255,255,.22)}
     .ghost-btn:disabled{opacity:.6;cursor:progress}
@@ -173,6 +181,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script>window.__DASHBOARD_BOOT__ = {{ {'authRequired': dashboard_auth_required}|tojson }};</script>
   {% raw %}
   <script>
 (()=>{
@@ -183,28 +192,28 @@ const pctFmt=new Intl.NumberFormat('th-TH',{style:'percent',maximumFractionDigit
 const shortDate=new Intl.DateTimeFormat('th-TH',{day:'numeric',month:'short'});
 const fullDT=new Intl.DateTimeFormat('th-TH',{dateStyle:'medium',timeStyle:'short',hour12:false});
 const decCache={};
-const riskMeta={high:{label:'ระดับสูง',color:'#ef4444'},medium:{label:'ระวัง',color:'#f97316'},general:{label:'ทั่วไป',color:'#22c55e'},contextual:{label:'บริบท',color:'#0ea5e9'},unknown:{label:'ไม่ระบุ',color:'#94a3b8'}};
+const riskMeta={high:{label:'à¸£à¸°à¸”à¸±à¸šà¸ªà¸¹à¸‡',color:'#ef4444'},medium:{label:'à¸£à¸°à¸§à¸±à¸‡',color:'#f97316'},general:{label:'à¸—à¸±à¹ˆà¸§à¹„à¸›',color:'#22c55e'},contextual:{label:'à¸šà¸£à¸´à¸šà¸—',color:'#0ea5e9'},unknown:{label:'à¹„à¸¡à¹ˆà¸£à¸°à¸šà¸¸',color:'#94a3b8'}};
 const lookbackOpts=[7,14,30,60,90,180];
 const userLimitOpts=[5,10,15,20,30];
 const kwLimitOpts=[5,10,15,20,30];
+const boot=window.__DASHBOARD_BOOT__||{authRequired:false};
+const AUTH_TOKEN_KEY='dashboard-api-token';
 
 function fmtN(v){const n=Number(v);return Number.isFinite(n)?numFmt.format(n):'--'}
 function fmtD(v,d=1){const n=Number(v);if(!Number.isFinite(n))return'--';if(!decCache[d])decCache[d]=new Intl.NumberFormat('th-TH',{minimumFractionDigits:d,maximumFractionDigits:d});return decCache[d].format(n)}
 function fmtP(r){const n=Number(r);return Number.isFinite(n)?pctFmt.format(Math.max(n,0)):'--'}
 function toDate(v){if(!v)return null;const d=new Date(v);return isNaN(d.getTime())?null:d}
 function fmtDT(v){const d=toDate(v);return d?fullDT.format(d):'-'}
-function fmtRange(a,b){const s=toDate(a),e=toDate(b);if(!s&&!e)return'-';return(s?shortDate.format(s):'-')+' – '+(e?shortDate.format(e):'-')}
+function fmtRange(a,b){const s=toDate(a),e=toDate(b);if(!s&&!e)return'-';return(s?shortDate.format(s):'-')+' â€“ '+(e?shortDate.format(e):'-')}
 
-function exportCSV(data,fn){
-  if(!data||!data.length){alert('ไม่มีข้อมูล');return}
-  const h=Object.keys(data[0]);
-  const csv=[h.join(','),...data.map(r=>h.map(k=>{const v=r[k]==null?'':String(r[k]);return v.includes(',')?`"${v}"`:v}).join(','))].join('\n');
-  const blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();
-}
-
+function readStoredToken(){try{return sessionStorage.getItem(AUTH_TOKEN_KEY)||''}catch{return''}}
+function persistToken(token){try{if(token)sessionStorage.setItem(AUTH_TOKEN_KEY,token);else sessionStorage.removeItem(AUTH_TOKEN_KEY)}catch{}}
+function toInputDate(value){const d=value?new Date(value):new Date();if(isNaN(d.getTime()))return'';const local=new Date(d.getTime()-d.getTimezoneOffset()*60000);return local.toISOString().slice(0,10)}
+function daysAgoInput(days){const d=new Date();d.setDate(d.getDate()-Math.max(days,0));return toInputDate(d)}
+function getDownloadFilename(disposition,fallback){const match=/filename="?([^";]+)"?/i.exec(disposition||'');return match?match[1]:fallback}
+function downloadBlob(blob,filename){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 function Spin({sm,pri}){return html`<span className=${'spinner'+(sm?' sm':'')+(pri?' pri':'')} />`}
-function getInitials(v){if(!v)return'—';const p=String(v).trim().split(/\s+/);return p.length>=2?`${p[0][0]}${p[1][0]}`.toUpperCase():String(v).slice(0,2).toUpperCase()}
+function getInitials(v){if(!v)return'--';const p=String(v).trim().split(/\s+/);if(p.length>=2)return (p[0][0]+p[1][0]).toUpperCase();return String(v).slice(0,2).toUpperCase()}
 
 /* ===== Chart helper: isDark ===== */
 function isDark(){return document.documentElement.getAttribute('data-theme')==='dark'}
@@ -265,7 +274,7 @@ function ChartTrend({entries}){
   const sum=entries.reduce((a,e)=>a+(Number(e.total_messages)||0),0);
   const sumImp=entries.reduce((a,e)=>a+(Number(e.important_messages)||0),0);
   return html`<div>
-    <div className="viz-metrics"><div className="vm"><span>ข้อความรวม</span><strong>${fmtN(sum)}</strong></div><div className="vm"><span>สำคัญ</span><strong>${fmtN(sumImp)}</strong></div><div className="vm"><span>สัดส่วน</span><strong>${fmtP(sum?sumImp/sum:0)}</strong></div></div>
+    <div className="viz-metrics"><div className="vm"><span>ข้อความรวม</span><strong>${fmtN(sum)}</strong></div><div className="vm"><span>à¸ªà¸³à¸„à¸±à¸</span><strong>${fmtN(sumImp)}</strong></div><div className="vm"><span>สัดส่วน</span><strong>${fmtP(sum?sumImp/sum:0)}</strong></div></div>
     <div className="viz-canvas"><canvas ref=${ref} /></div></div>`;
 }
 
@@ -284,7 +293,7 @@ function ChartRiskTrend({entries}){
         {label:'ทั่วไป',data:entries.map(e=>e.general||0),borderColor:'#22c55e',backgroundColor:'rgba(34,197,94,.2)',fill:'origin',tension:.3,pointRadius:3}
       ]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-        scales:{y:{stacked:true,beginAtZero:true,ticks:{color:tickColor()},grid:{color:gridColor()},title:{display:true,text:'จำนวนเหตุการณ์',color:labelColor()}},
+        scales:{y:{stacked:true,beginAtZero:true,ticks:{color:tickColor()},grid:{color:gridColor()},title:{display:true,text:'à¸ˆà¸³à¸™à¸§à¸™à¹€à¸«à¸•à¸¸à¸à¸²à¸£à¸“à¹Œ',color:labelColor()}},
           x:{ticks:{color:tickColor()},grid:{display:false}}},
         plugins:{legend:{display:true,labels:{usePointStyle:true,color:labelColor()}},tooltip:{...tipStyle(),mode:'index'}}}
     });
@@ -527,7 +536,7 @@ function VizPanel({activeTab,onTabChange,insights,multiAiStats}){
 }
 
 /* ===== USER TABLE ===== */
-function UserTable({users,onInspect,searchQuery,onSearchChange}){
+function UserTable({users,onInspect,searchQuery,onSearchChange,usersMeta}){
   const[sf,setSf]=useState('total_messages');
   const[sd,setSd]=useState('desc');
   const handleSort=f=>{if(sf===f)setSd(sd==='asc'?'desc':'asc');else{setSf(f);setSd('desc')}};
@@ -537,7 +546,10 @@ function UserTable({users,onInspect,searchQuery,onSearchChange}){
     items.sort((a,b)=>{let av=a[sf],bv=b[sf];if(sf==='last_interaction'){av=new Date(av).getTime();bv=new Date(bv).getTime()}else{av=Number(av)||0;bv=Number(bv)||0}return sd==='asc'?av-bv:bv-av});
     return items;
   },[users,searchQuery,sf,sd]);
-  const si=f=>sf!==f?'↕':sd==='asc'?'↑':'↓';
+  const totalAvailable=Number(usersMeta?.total)||((Array.isArray(users)&&users.length)||0);
+  const shownCount=(Array.isArray(users)&&users.length)||0;
+  const subtitle=searchQuery?.trim()?`${fmtN(filtered.length)} matches in current window`:`Showing ${fmtN(shownCount)} of ${fmtN(totalAvailable)} users in current window`;
+  const si=f=>sf!==f?'sort':sd==='asc'?'asc':'desc';
   return html`<section className="card">
     <div className="card-head"><div><p className="eyebrow">ผู้ใช้ที่ต้องติดตาม</p><h3>ภาพรวมผู้ใช้รายบุคคล</h3></div><p className="card-subtitle" style=${{fontSize:'.82rem',color:'var(--text-muted)'}}>คลิกเพื่อดูรายละเอียด</p></div>
     <div className="search-box"><span>🔍</span><input type="search" placeholder="ค้นหาผู้ใช้..." value=${searchQuery} onChange=${e=>onSearchChange(e.target.value)} /></div>
@@ -576,7 +588,8 @@ function UserModal({userId,detail,loading,error,onClose}){
 
 /* ===== MAIN APP ===== */
 function App(){
-  const[params,setParams]=useState({lookbackDays:30,userLimit:12,keywordLimit:10});
+  const authRequired=Boolean(boot.authRequired);
+  const[params,setParams]=useState({lookbackDays:30,userLimit:10,keywordLimit:10});
   const[insights,setInsights]=useState(null);
   const[loading,setLoading]=useState(false);
   const[error,setError]=useState(null);
@@ -589,33 +602,51 @@ function App(){
   const[tab,setTab]=useState('trend');
   const[theme,setTheme]=useState(()=>localStorage.getItem('dashboard-theme')||'light');
   const[multiAiStats,setMultiAiStats]=useState(null);
+  const[authToken,setAuthToken]=useState(()=>readStoredToken());
+  const[authInput,setAuthInput]=useState('');
+  const[authError,setAuthError]=useState(null);
+  const[exportState,setExportState]=useState(()=>({startDate:daysAgoInput(29),endDate:toInputDate(new Date()),format:'csv',anonymize:true}));
+  const[exporting,setExporting]=useState(false);
+  const[exportMessage,setExportMessage]=useState('');
 
   useEffect(()=>{document.documentElement.setAttribute('data-theme',theme);localStorage.setItem('dashboard-theme',theme)},[theme]);
-  useEffect(()=>{const t=setInterval(()=>setRi(i=>i+1),60000);return()=>clearInterval(t)},[]);
-
-  useEffect(()=>{if(tab!=='multi_ai')return;let a=true;
-    (async()=>{try{const q=new URLSearchParams({lookback_days:params.lookbackDays});const r=await fetch('/api/dashboard/multi-ai-stats?'+q);if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();if(a)setMultiAiStats(d)}catch(e){console.error('[multi-ai-stats]',e)}})();
-    return()=>{a=false};
-  },[tab,params.lookbackDays,ri]);
-
-  useEffect(()=>{let a=true;setLoading(true);setError(null);
-    (async()=>{try{const q=new URLSearchParams({limit:params.userLimit,lookback_days:params.lookbackDays,keyword_limit:params.keywordLimit});const r=await fetch('/api/dashboard/insights?'+q);if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();if(a)setInsights(d)}catch(e){console.error(e);if(a)setError('ไม่สามารถดึงข้อมูลได้')}finally{if(a)setLoading(false)}})();
-    return()=>{a=false};
-  },[params,ri]);
-
-  useEffect(()=>{if(!selUser){setUserDetail(null);setUserErr(null);return}let a=true;setUserLoad(true);setUserErr(null);setUserDetail(null);
-    (async()=>{try{const r=await fetch('/api/dashboard/users/'+encodeURIComponent(selUser)+'/history?limit=80');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();if(a)setUserDetail(d)}catch(e){console.error(e);if(a)setUserErr('ไม่สามารถโหลดรายละเอียดได้')}finally{if(a)setUserLoad(false)}})();
-    return()=>{a=false};
-  },[selUser]);
+  useEffect(()=>{const t=setInterval(()=>setRi(i=>i+1),300000);return()=>clearInterval(t)},[]);
+  useEffect(()=>{setExportState(s=>({...s,startDate:daysAgoInput(params.lookbackDays-1),endDate:toInputDate(new Date())}))},[params.lookbackDays]);
 
   const onParam=useCallback((k,v)=>setParams(p=>p[k]===v?p:{...p,[k]:v}),[]);
   const refresh=useCallback(()=>setRi(i=>i+1),[]);
+  const onExportField=useCallback((k,v)=>setExportState(s=>s[k]===v?s:{...s,[k]:v}),[]);
+  const handleUnauthorized=useCallback(()=>setAuthError('Dashboard access token is required or invalid.'),[]);
+  const buildHeaders=useCallback((base={})=>{const headers=new Headers(base);if(authToken)headers.set('Authorization','Bearer '+authToken);return headers},[authToken]);
+  const fetchJson=useCallback(async(url,options={})=>{const res=await fetch(url,{...options,headers:buildHeaders(options.headers||{})});if(res.status===401){handleUnauthorized();const err=new Error('AUTH_REQUIRED');err.code='AUTH_REQUIRED';throw err}if(!res.ok){let payload=null;try{payload=await res.json()}catch{}throw new Error(payload?.message||payload?.error||('HTTP '+res.status))}setAuthError(null);return res.json()},[buildHeaders,handleUnauthorized]);
+
+  useEffect(()=>{if(tab!=='multi_ai'){return}if(authRequired&&!authToken){setMultiAiStats(null);return}let a=true;
+    (async()=>{try{const q=new URLSearchParams({lookback_days:params.lookbackDays});const d=await fetchJson('/api/dashboard/multi-ai-stats?'+q);if(a)setMultiAiStats(d)}catch(e){if(a&&e.message!=='AUTH_REQUIRED'){console.error('[multi-ai-stats]',e)}}})();
+    return()=>{a=false};
+  },[tab,params.lookbackDays,ri,authRequired,authToken,fetchJson]);
+
+  useEffect(()=>{if(authRequired&&!authToken){setLoading(false);setError(null);setInsights(null);return}let a=true;setLoading(true);setError(null);
+    (async()=>{try{const q=new URLSearchParams({limit:params.userLimit,lookback_days:params.lookbackDays,keyword_limit:params.keywordLimit});const d=await fetchJson('/api/dashboard/insights?'+q);if(a)setInsights(d)}catch(e){if(!a)return;if(e.message==='AUTH_REQUIRED'){setInsights(null);setError(null)}else{console.error(e);setError('Unable to load dashboard data.')}}finally{if(a)setLoading(false)}})();
+    return()=>{a=false};
+  },[params,ri,authRequired,authToken,fetchJson]);
+
+  useEffect(()=>{if(!selUser){setUserDetail(null);setUserErr(null);return}if(authRequired&&!authToken){setUserDetail(null);setUserErr('Dashboard access token required.');return}let a=true;setUserLoad(true);setUserErr(null);setUserDetail(null);
+    (async()=>{try{const q=new URLSearchParams({limit:80,lookback_days:params.lookbackDays});const d=await fetchJson('/api/dashboard/users/'+encodeURIComponent(selUser)+'/history?'+q);if(a)setUserDetail(d)}catch(e){if(!a)return;if(e.message==='AUTH_REQUIRED'){setUserErr('Dashboard access token required.')}else{console.error(e);setUserErr('Unable to load user details.')}}finally{if(a)setUserLoad(false)}})();
+    return()=>{a=false};
+  },[selUser,params.lookbackDays,authRequired,authToken,fetchJson]);
+
+  const connectToken=useCallback(()=>{const token=authInput.trim();if(!token){setAuthError('Enter the dashboard access token.');return}persistToken(token);setAuthToken(token);setAuthInput('');setAuthError(null);setError(null);setRi(i=>i+1)},[authInput]);
+  const clearToken=useCallback(()=>{persistToken('');setAuthToken('');setAuthInput('');setAuthError(null);setInsights(null);setMultiAiStats(null);setUserDetail(null);setSelUser(null)},[]);
+  const runExport=useCallback(async()=>{if(authRequired&&!authToken){setAuthError('Enter the dashboard access token before exporting.');return}setExporting(true);setExportMessage('');try{const q=new URLSearchParams({format:exportState.format,start_date:exportState.startDate,end_date:exportState.endDate,anonymize:String(exportState.anonymize)});const res=await fetch('/api/dashboard/export?'+q,{headers:buildHeaders()});if(res.status===401){handleUnauthorized();throw new Error('AUTH_REQUIRED')}if(!res.ok){let payload=null;try{payload=await res.json()}catch{}throw new Error(payload?.message||payload?.error||('HTTP '+res.status))}const blob=await res.blob();downloadBlob(blob,getDownloadFilename(res.headers.get('Content-Disposition'),'dashboard-export.'+exportState.format));setExportMessage('Export downloaded.');setAuthError(null)}catch(e){if(e.message!=='AUTH_REQUIRED'){console.error(e);setExportMessage(e.message||'Export failed.')}}finally{setExporting(false)}},[authRequired,authToken,exportState,buildHeaders,handleUnauthorized]);
+
   const genLabel=useMemo(()=>fmtDT(insights?.generated_at),[insights?.generated_at]);
+  const windowLabel=useMemo(()=>fmtRange(insights?.window?.start,insights?.window?.end),[insights?.window?.start,insights?.window?.end]);
   const ov=insights?.overview||{total_conversations:0,unique_users:0,important_messages:0,active_follow_ups:0};
   const inf=insights?.infographic||{engagement:{},quality:{},message_trend:[]};
   const impShare=Number(inf.quality?.important_message_share)||0;
   const avgTok=Number(inf.quality?.avg_tokens_per_message)||0;
   const deepU=Number(inf.quality?.deep_conversation_users)||0;
+  const needsAuth=authRequired&&!authToken;
 
   return html`<div className="shell">
     <header className="hero"><div className="wrap">
@@ -623,32 +654,40 @@ function App(){
       <div className="hero-status">
         <span className=${'chip '+(loading?'load':error?'err':'ok')}>${loading?html`<${Spin} sm />`:null}<span>${loading?'อัปเดต...':error?'ผิดพลาด':'พร้อมใช้งาน'}</span></span>
         <p style=${{fontSize:'.82rem'}}>อัปเดตล่าสุด: ${genLabel||'—'}</p>
+        ${authRequired?html`<p style=${{fontSize:'.82rem'}}>Access: ${authToken?'token connected':'token required'}</p>`:null}
         <div className="hero-row"><button className="theme-btn" onClick=${()=>setTheme(t=>t==='light'?'dark':'light')}><span>${theme==='light'?'🌙':'☀️'}</span><span>${theme==='light'?'โหมดมืด':'โหมดสว่าง'}</span></button></div>
       </div>
     </div></header>
 
     <main className="main wrap">
-      <!-- Filter -->
       <section className="card">
         <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'12px'}}>
           <div><p className="eyebrow">การตั้งค่า</p><h2 style=${{fontSize:'1.2rem'}}>พารามิเตอร์การวิเคราะห์</h2></div>
-          <div style=${{display:'flex',gap:'8px',flexWrap:'wrap'}}>
-            <button className="ghost-btn" onClick=${refresh} disabled=${loading}>${loading?html`<${Spin} sm />`:html`<span>⟳</span>`}<span>${loading?'โหลด':'รีเฟรช'}</span></button>
-            <button className="primary-btn" onClick=${()=>{if(!insights?.users?.length){alert('ไม่มีข้อมูล');return}const d=insights.users.map(u=>({'User ID':u.user_id,'ข้อความ':u.total_messages,'สำคัญ':u.important_messages,'สัดส่วน (%)':(u.important_ratio*100).toFixed(2),'ล่าสุด':u.last_interaction}));exportCSV(d,'dashboard-'+new Date().toISOString().slice(0,10)+'.csv')}}>ส่งออก CSV</button>
-          </div>
+          <div className="action-row"><button className="ghost-btn" onClick=${refresh} disabled=${loading||needsAuth}>${loading?html`<${Spin} sm />`:html`<span>⟳</span>`}<span>${loading?'โหลด':'รีเฟรช'}</span></button></div>
         </div>
+        ${authRequired?html`<div className="panel"><div style=${{display:'flex',justifyContent:'space-between',gap:'12px',flexWrap:'wrap'}}><div><p className="eyebrow">Access</p><h3 style=${{fontSize:'1rem'}}>Dashboard token</h3></div><p className="helper">Use the same bearer token as the dashboard API.</p></div><div className="panel-row"><label className="field"><span>Access token</span><input type="password" value=${authInput} placeholder="Paste token" onChange=${e=>setAuthInput(e.target.value)} /></label></div><div className="action-row"><button className="primary-btn" onClick=${connectToken}>Connect</button>${authToken?html`<button className="ghost-btn" onClick=${clearToken}>Clear token</button>`:null}${authError?html`<span className="helper" style=${{color:'#dc2626'}}>${authError}</span>`:html`<span className="helper">${authToken?'Token stored for this browser session.':'Enter a token to load data.'}</span>`}</div></div>`:null}
         <div className="filter-row">
           <label className="field"><span>ช่วงเวลา (วัน)</span><select value=${params.lookbackDays} onChange=${e=>onParam('lookbackDays',+e.target.value)}>${lookbackOpts.map(d=>html`<option key=${d} value=${d}>${d} วัน</option>`)}</select></label>
           <label className="field"><span>จำนวนผู้ใช้สูงสุด</span><select value=${params.userLimit} onChange=${e=>onParam('userLimit',+e.target.value)}>${userLimitOpts.map(l=>html`<option key=${l} value=${l}>${l} คน</option>`)}</select></label>
           <label className="field"><span>คีย์เวิร์ดยอดนิยม</span><select value=${params.keywordLimit} onChange=${e=>onParam('keywordLimit',+e.target.value)}>${kwLimitOpts.map(l=>html`<option key=${l} value=${l}>${l} คำ</option>`)}</select></label>
         </div>
-        <p className="updated-at" style=${{marginTop:'12px'}}>อัปเดตล่าสุด: ${genLabel||'—'} (อัตโนมัติทุก 60 วินาที)</p>
+        <div className="panel">
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px',flexWrap:'wrap'}}><div><p className="eyebrow">Export</p><h3 style=${{fontSize:'1rem'}}>Research export</h3></div><div className="action-row"><button className="primary-btn" onClick=${runExport} disabled=${exporting||needsAuth}>${exporting?html`<${Spin} sm />`:null}<span>${exporting?'Exporting':'Download export'}</span></button></div></div>
+          <div className="panel-row">
+            <label className="field"><span>Start date</span><input type="date" value=${exportState.startDate} onChange=${e=>onExportField('startDate',e.target.value)} /></label>
+            <label className="field"><span>End date</span><input type="date" value=${exportState.endDate} onChange=${e=>onExportField('endDate',e.target.value)} /></label>
+            <label className="field"><span>Format</span><select value=${exportState.format} onChange=${e=>onExportField('format',e.target.value)}><option value="csv">CSV</option><option value="json">JSON</option></select></label>
+            <label className="checkline"><input type="checkbox" checked=${exportState.anonymize} onChange=${e=>onExportField('anonymize',e.target.checked)} /><span>Anonymize participant IDs</span></label>
+          </div>
+          <p className="helper" style=${exportMessage?{marginTop:'10px',color:'var(--text-primary)'}:{marginTop:'10px'}}>${exportMessage||'Uses the backend export endpoint for the selected date range.'}</p>
+        </div>
+        <p className="updated-at" style=${{marginTop:'12px'}}>อัปเดตล่าสุด: ${genLabel||'—'} (อัตโนมัติทุก 5 นาที)</p>
       </section>
 
-      ${error&&!insights?html`<div className="card error-card"><p>${error}</p><button className="primary-btn" onClick=${refresh}>ลองอีกครั้ง</button></div>`:null}
-      ${loading&&!insights?html`<div className="skel-grid">${[0,1,2,3].map(i=>html`<div key=${i} className="card skel" />`)}</div>`
+      ${needsAuth?html`<div className="card"><p className="helper">Enter the dashboard access token above to load analytics and export data.</p></div>`:null}
+      ${error&&!insights&&!needsAuth?html`<div className="card error-card"><p>${error}</p><button className="primary-btn" onClick=${refresh}>Retry</button></div>`:null}
+      ${loading&&!insights&&!needsAuth?html`<div className="skel-grid">${[0,1,2,3].map(i=>html`<div key=${i} className="card skel" />`)}</div>`
       :insights?html`
-        <!-- Stats -->
         <section className="stats">
           ${[
             {k:'total',l:'บทสนทนาทั้งหมด',v:fmtN(ov.total_conversations),h:'ในช่วงที่เลือก',c:'#6366f1'},
@@ -660,11 +699,8 @@ function App(){
           ].map(s=>html`<article key=${s.k} className="stat"><div className="stat-icon" style=${{backgroundColor:s.c+'20',color:s.c}}><span>●</span></div><div className="stat-body"><p className="stat-lbl">${s.l}</p><p className="stat-val">${s.v}</p><p className="stat-hint">${s.h}</p></div></article>`)}
         </section>
 
-        <!-- Single Visualization with Tabs -->
         <${VizPanel} activeTab=${tab} onTabChange=${setTab} insights=${insights} multiAiStats=${multiAiStats} />
-
-        <!-- User Table -->
-        <${UserTable} users=${insights?.users||[]} onInspect=${setSelUser} searchQuery=${search} onSearchChange=${setSearch} />
+        <${UserTable} users=${insights?.users||[]} usersMeta=${insights?.users_meta||{}} onInspect=${setSelUser} searchQuery=${search} onSearchChange=${setSearch} />
       `:null}
     </main>
 
