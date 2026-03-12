@@ -24,25 +24,23 @@ def init_data_management(db_manager, redis_client):
 def get_privacy_policy_message() -> str:
     """Return the privacy policy text shown to users via /privacy command."""
     return (
-        "🔒 นโยบายความเป็นส่วนตัว — น้องใจดี\n\n"
-        "📋 ข้อมูลที่เราเก็บรวบรวม:\n"
+        "🔒 นโยบายความเป็นส่วนตัว — น้องใจดี\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 ข้อมูลที่จัดเก็บ\n"
         "• ประวัติการสนทนากับน้องใจดี\n"
-        "• ข้อมูลจากแบบประเมิน (ถ้าลงทะเบียน)\n"
-        "• ข้อมูลความก้าวหน้าและการประเมินความเสี่ยง\n"
-        "• กำหนดการติดตามผล\n\n"
-        "🎯 วัตถุประสงค์:\n"
-        "• ให้คำปรึกษาที่เหมาะสมกับบริบทของคุณ\n"
-        "• ติดตามความก้าวหน้าในการเลิกสารเสพติด\n"
-        "• วิจัยเพื่อพัฒนาระบบให้ดีขึ้น (ข้อมูลจะถูกปิดบังตัวตน)\n\n"
-        "⏰ ระยะเวลาเก็บรักษา:\n"
-        "• ข้อมูลการสนทนา: เก็บตลอดระยะเวลาใช้งาน\n"
-        "• ข้อมูลเซสชัน (Redis): หมดอายุอัตโนมัติใน 7 วัน\n\n"
-        "🛡️ สิทธิ์ของคุณ:\n"
-        "• ดูข้อมูลที่เก็บ: /context, /status\n"
-        "• ลบข้อมูลทั้งหมด: /deletedata\n"
-        "• ล้างประวัติสนทนา: /reset\n\n"
-        "📞 ติดต่อ: หากมีคำถามเกี่ยวกับข้อมูลส่วนบุคคล "
-        "สามารถติดต่อทีมงานได้ที่ pahnkcn@gmail.com"
+        "• ข้อมูลแบบประเมิน (กรณีลงทะเบียน)\n"
+        "• ข้อมูลความก้าวหน้าและระดับความเสี่ยง\n"
+        "• กำหนดการนัดติดตามผล\n"
+        "\n🎯 วัตถุประสงค์การใช้ข้อมูล\n"
+        "• เพื่อให้คำปรึกษาที่เหมาะสมกับสถานการณ์ของคุณ\n"
+        "• เพื่อติดตามความก้าวหน้าในการดูแลตนเอง\n"
+        "• เพื่อพัฒนาคุณภาพระบบ (ข้อมูลจะถูกปกปิดตัวตน)\n"
+        "\n⏰ ระยะเวลาจัดเก็บ\n"
+        "• ประวัติสนทนา — ตลอดระยะเวลาที่ใช้งาน\n"
+        "• ข้อมูลเซสชัน — หมดอายุอัตโนมัติใน 7 วัน\n"
+        "\n🛡️ สิทธิ์ของคุณ\n"
+        "• ดูข้อมูลที่จัดเก็บ → /context, /status\n"
+        "\n📞 ติดต่อทีมงานได้ที่ pahnkcn@gmail.com"
     )
 
 
@@ -111,16 +109,8 @@ def delete_all_user_data(user_id: str) -> Dict[str, Any]:
         logging.error(f"Failed to delete user_metrics for {user_id}: {e}")
         result['errors'].append(f"user_metrics: {e}")
 
-    # 4. Clear registration data (anonymize, keep code for referential integrity)
-    try:
-        _db_manager.execute_and_commit(
-            "UPDATE registration_codes SET user_id = NULL, form_data = NULL WHERE user_id = %s",
-            (user_id,),
-        )
-        result['registration_cleared'] = True
-    except Exception as e:
-        logging.error(f"Failed to clear registration for {user_id}: {e}")
-        result['errors'].append(f"registration: {e}")
+    # 4. Keep registration data intact so user can re-verify without re-filling the form
+    result['registration_cleared'] = False
 
     # 5. Delete Redis keys
     redis_keys_to_delete = [
@@ -202,15 +192,12 @@ def format_deletion_result(result: Dict[str, Any]) -> str:
     msg += f"• ประวัติการสนทนา: {result['conversations_deleted']} รายการ\n"
     msg += f"• การติดตามผล: {result['follow_ups_deleted']} รายการ\n"
     msg += f"• ข้อมูลเมตริก: {result['metrics_deleted']} รายการ\n"
-    msg += f"• ข้อมูลลงทะเบียน: {'ล้างแล้ว' if result['registration_cleared'] else 'ไม่พบ'}\n"
     msg += f"• ข้อมูลเซสชัน: {result['redis_keys_deleted']} คีย์\n\n"
 
     if result['errors']:
         msg += f"⚠️ พบข้อผิดพลาด {len(result['errors'])} รายการ กรุณาติดต่อผู้ดูแลระบบ\n\n"
     else:
         msg += "✅ ลบข้อมูลทั้งหมดเรียบร้อยแล้ว\n\n"
-
-    msg += "คุณยังสามารถใช้งานน้องใจดีต่อได้ หากต้องการลงทะเบียนใหม่ พิมพ์ /register"
 
     return msg
 

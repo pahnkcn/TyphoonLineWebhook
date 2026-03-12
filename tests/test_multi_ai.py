@@ -26,6 +26,7 @@ os.environ.setdefault("MYSQL_DB", "test_chatbot")
 
 from app.llm.providers import AIProvider, ProviderRegistry, reset_registry
 from app.llm.multi_ai import (
+    _cooldown_before_evaluation,
     _parse_evaluation_json,
     _build_evaluation_prompt,
     aggregate_scores,
@@ -714,3 +715,47 @@ class TestTokenTracking:
         assert "provB" in result.token_usage
         assert result.token_usage["provA"]["total"] == 150
         assert result.token_usage["provB"]["prompt"] == 120
+
+    def test_multi_ai_chat_merges_all_system_messages_for_evaluation(self):
+        captured = {}
+
+        def mock_gen_all(messages, registry, temperature, max_tokens, timeout=60):
+            return [
+                ProviderResponse("provA", "Response A", 500, True, ""),
+                ProviderResponse("provB", "Response B", 600, True, ""),
+            ]
+
+        def mock_cross_eval(user_msg, responses, registry, system_context="", timeout=80):
+            captured["system_context"] = system_context
+            return [
+                EvaluationResult("provA", {"provB": 80.0}),
+                EvaluationResult("provB", {"provA": 90.0}),
+            ]
+
+        with patch("app.llm.multi_ai.generate_all", side_effect=mock_gen_all), \
+             patch("app.llm.multi_ai.cross_evaluate", side_effect=mock_cross_eval):
+            multi_ai_chat(
+                [
+                    {"role": "system", "content": "base instructions"},
+                    {"role": "system", "content": "rag context"},
+                    {"role": "user", "content": "test"},
+                ],
+                registry=MagicMock(),
+            )
+
+        assert "base instructions" in captured["system_context"]
+        assert "rag context" in captured["system_context"]
+
+
+class TestCooldownBeforeEvaluation:
+    def test_no_budget_returns_zero_when_almost_exhausted(self):
+        with patch("app.llm.multi_ai.time.time", return_value=10.5):
+            cooldown = _cooldown_before_evaluation(10.0, 0.0)
+
+        assert cooldown == 0.0
+
+    def test_budgeted_cooldown_scales_with_remaining_time(self):
+        with patch("app.llm.multi_ai.time.time", return_value=2.0):
+            cooldown = _cooldown_before_evaluation(20.0, 0.0)
+
+        assert cooldown == pytest.approx(1.5)

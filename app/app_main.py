@@ -54,8 +54,7 @@ from .config import (
 )
 from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
 from .llm import grok_client
-from .llm.multi_ai import multi_ai_chat
-from .llm.providers import get_registry as get_multi_ai_registry
+from .llm.ai_caller import call_ai
 from .chat_history_db import ChatHistoryDB
 from .token_counter import TokenCounter
 from .session_manager import (
@@ -82,6 +81,7 @@ from .risk_assessment import (
 from .services.admin_alerting import alert_high_risk_user
 from .database_init import initialize_database
 from .database_manager import DatabaseManager
+from .rag import init_knowledge_base
 from .error_handling import (
     ChatbotError,
     ErrorCategory,
@@ -100,6 +100,23 @@ from enum import Enum
 _AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.getenv('AI_EXECUTOR_WORKERS', '4'))
 )
+
+# Shared ThreadPoolExecutor for background tasks
+_BACKGROUND_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv('BACKGROUND_EXECUTOR_WORKERS', '4'))
+)
+
+def _submit_background_task(task_name: str, func, *args, **kwargs) -> None:
+    def _run():
+        try:
+            func(*args, **kwargs)
+        except Exception as exc:
+            logging.error(f"[background:{task_name}] {exc}", exc_info=True)
+
+    try:
+        _BACKGROUND_EXECUTOR.submit(_run)
+    except RuntimeError as exc:
+        logging.error(f"Failed to submit background task '{task_name}': {exc}")
 
 # Circuit breakers สำหรับป้องกัน cascading failures
 _xai_circuit_breaker = CircuitBreaker(
@@ -128,7 +145,6 @@ PROCESSING_MESSAGES = [
 ]
 HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
 MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
-
 
 # สร้างอินสแตนซ์แอป Flask
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -163,6 +179,7 @@ logging.basicConfig(
 
 # โหลดการตั้งค่าและตัวแปรสภาพแวดล้อม
 config = load_config()
+knowledge_base = None
 
 # เริ่มต้นเซอร์วิสภายนอก
 try:
@@ -260,6 +277,29 @@ try:
     from .services.proactive_checkin import init_proactive_checkin
     init_proactive_checkin(db_manager, redis_client, line_bot_api)
 
+    # เริ่มต้นระบบ RAG knowledge base (ไม่ทำให้แอปล้มถ้า init ไม่สำเร็จ)
+    try:
+        knowledge_base = init_knowledge_base(
+            db_manager=db_manager,
+            redis_client=redis_client,
+            docs_dir=os.path.join(BASE_DIR, 'knowledge_docs'),
+            enabled=getattr(config, 'RAG_ENABLED', True),
+            auto_ingest=True,
+            chunk_size=getattr(config, 'RAG_CHUNK_SIZE', 1100),
+            overlap=getattr(config, 'RAG_CHUNK_OVERLAP', 120),
+            min_score=getattr(config, 'RAG_MIN_SCORE', 0.42),
+            embedding_dim=getattr(config, 'RAG_EMBEDDING_DIM', 1536),
+            base_fetch_k=getattr(config, 'RAG_FETCH_K', 36),
+            max_context_chars=getattr(config, 'RAG_MAX_CONTEXT_CHARS', 5200),
+        )
+        if knowledge_base is not None:
+            logging.info("RAG knowledge base initialized: %s", knowledge_base.get_stats())
+        else:
+            logging.info("RAG knowledge base is disabled or unavailable")
+    except Exception as rag_error:
+        knowledge_base = None
+        logging.warning("RAG knowledge base initialization failed: %s", rag_error)
+
 except Exception as e:
     logging.critical(f"เกิดข้อผิดพลาดในการเริ่มต้นแอปพลิเคชัน: {str(e)}")
     raise
@@ -269,7 +309,7 @@ limiter = init_limiter(app)
 
 # Register dashboard Blueprint
 from .routes.dashboard import dashboard_bp, init_dashboard
-init_dashboard(db, db_manager, redis_client, GENERAL_RISK_LEVEL)
+init_dashboard(db, db_manager, redis_client, GENERAL_RISK_LEVEL, knowledge_base=knowledge_base)
 app.register_blueprint(dashboard_bp)
 
 
@@ -340,7 +380,6 @@ from .services.context_manager import (
     summarize_conversation_history as _ctx_summarize_history,
     summarize_by_topic as _ctx_summarize_by_topic,
     filter_messages_for_api,
-    optimize_context,
 )
 
 
@@ -348,10 +387,6 @@ def summarize_conversation_chunk(chunk):
     """สรุปส่วนของประวัติการสนทนา — delegates to services.context_manager"""
     return _ctx_summarize_chunk(chunk, config)
 
-
-def process_and_optimize_history(user_id, max_tokens=450000):
-    """ประมวลผลและปรับปรุงประวัติการสนทนา — delegates to services.context_manager"""
-    return optimize_context(user_id, config, db, max_tokens=max_tokens)
 
 
 def summarize_conversation_history(history):
@@ -388,6 +423,7 @@ def is_user_registered(user_id):
 
 def register_user_with_code(user_id, code):
     """ยืนยันการลงทะเบียนด้วยรหัสยืนยันและโหลดบริบทผู้ใช้"""
+    cache_key = f"registered:{user_id}"
     try:
         # ตรวจสอบว่ารหัสมีอยู่และยังไม่หมดอายุ
         query = 'SELECT code, form_data FROM registration_codes WHERE code = %s AND status = %s'
@@ -432,7 +468,7 @@ def register_user_with_code(user_id, code):
 
         # Invalidate registration cache so subsequent checks see the new status immediately
         try:
-            redis_client.setex(f"registered:{user_id}", 300, '1')
+            redis_client.setex(cache_key, 300, '1')
         except Exception:
             pass
 
@@ -945,8 +981,8 @@ def summarize_form_data(form_data):
 - **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที** - **สำคัญมาก**
 """
 
-        # เรียก xAI Grok API
-        summary = grok_client.send_chat(
+        # เรียก AI API (รองรับ multi-AI consensus)
+        summary = call_ai(
             messages=[
                 {
                     "role": "system",
@@ -1011,7 +1047,7 @@ def _send_token_threshold_warning(user_id: str):
                 "📊 ข้อควรทราบ: ประวัติการสนทนาของเรากำลังเติบโต ระบบอาจจะต้องสรุปบางส่วน"
                 "ในการสนทนาต่อไปเพื่อรักษาประสิทธิภาพ\n\n"
                 f"• โทเค็นในเซสชันปัจจุบัน: {session_token_count:,} จาก {TOKEN_THRESHOLD:,} ({(session_token_count/TOKEN_THRESHOLD*100):.1f}%)\n"
-                "• คุณสามารถใช้คำสั่ง /optimize เพื่อปรับปรุงประวัติการสนทนาได้ทุกเมื่อ"
+                "• ระบบจะปรับปรุงประวัติการสนทนาให้อัตโนมัติเมื่อจำเป็น"
             )
             redis_client.setex(f"token_warning:{user_id}", 1800, "1")
             time.sleep(3)
@@ -1076,6 +1112,8 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
     bot_response = None
     error_occurred = False
     fallback_response = None
+    rag_context = ""
+    rag_sources: List[Dict[str, object]] = []
     
     try:
         # 1. ดึงบริบทผู้ใช้ (ไม่ critical - สามารถทำงานต่อได้แม้ไม่มีบริบท)
@@ -1112,6 +1150,42 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         # 3.5 ประเมินความเสี่ยงล่วงหน้าเพื่อเลือก AI config ที่เหมาะสม
         pre_risk_level, _ = assess_risk(user_message)
+
+        # 3.6 ดึงบริบทความรู้จาก RAG (best-effort)
+        if getattr(config, 'RAG_ENABLED', False) and knowledge_base is not None:
+            try:
+                rag_topic_hint = "crisis" if pre_risk_level == "high" else None
+                rag_payload = knowledge_base.query_with_sources(
+                    user_message,
+                    top_k=getattr(config, 'RAG_TOP_K', 4),
+                    topic_hint=rag_topic_hint,
+                )
+                rag_context = str(rag_payload.get("context") or "")
+                rag_sources = list(rag_payload.get("sources") or [])
+
+                if rag_sources:
+                    source_labels = []
+                    for item in rag_sources[:5]:
+                        doc_name = str(item.get("doc_name") or "unknown")
+                        chunk_index = int(item.get("chunk_index") or 0)
+                        try:
+                            score = float(item.get("score") or 0.0)
+                        except (TypeError, ValueError):
+                            score = 0.0
+                        source_labels.append(f"{doc_name}#{chunk_index}({score:.3f})")
+
+                    logging.info(
+                        "[RAG] user=%s retrieved %s chunk(s): %s",
+                        user_id,
+                        len(rag_sources),
+                        ", ".join(source_labels),
+                    )
+                else:
+                    logging.info("[RAG] user=%s retrieved 0 chunk(s)", user_id)
+            except Exception as rag_error:
+                rag_context = ""
+                rag_sources = []
+                logging.warning("RAG query failed for user %s: %s", user_id, rag_error)
         
         # 4. เรียก AI API พร้อม retry mechanism (2 retries + grok_client built-in retry = 4 max)
         bot_response = None
@@ -1120,7 +1194,13 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
         
         while retry_count < max_retries and bot_response is None:
             try:
-                response_text = generate_ai_response_with_timeout(messages, timeout=30, user_id=user_id, risk_level=pre_risk_level)
+                response_text = generate_ai_response_with_timeout(
+                    messages,
+                    timeout=30,
+                    user_id=user_id,
+                    risk_level=pre_risk_level,
+                    rag_context=rag_context,
+                )
                 
                 if not response_text:
                     raise ValueError("Empty AI response")
@@ -1202,11 +1282,11 @@ def process_ai_response_with_context(user_id: str, user_message: str, start_time
             'fallback_response': fallback_response,
             'error_occurred': error_occurred,
         }
-        threading.Thread(
-            target=_post_response_background,
-            kwargs=_post_response_args,
-            daemon=True,
-        ).start()
+        _submit_background_task(
+            'post_response',
+            _post_response_background,
+            **_post_response_args,
+        )
         
     except ChatbotError as e:
         # จัดการ custom errors
@@ -1390,7 +1470,40 @@ def _save_multi_ai_log(user_id: str, consensus) -> None:
         logging.warning(f"[multi-ai] Failed to persist consensus log: {e}")
 
 
-def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: int = 30, user_id: str = "system", risk_level: str = None) -> str:
+def _get_latest_user_message(messages: List[Dict[str, str]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg.get("content", "")
+    return ""
+
+
+def _build_info_grounding_message(has_rag_context: bool) -> Dict[str, str]:
+    if has_rag_context:
+        return {
+            "role": "system",
+            "content": (
+                "คำแนะนำเพิ่มเติมสำหรับคำถามเชิงข้อมูล: ให้ยึดบริบทความรู้จากระบบเป็นหลัก "
+                "สรุปเฉพาะสิ่งที่รองรับได้จากบริบทและการสนทนาปัจจุบัน หลีกเลี่ยงการเติมรายละเอียดเชิงข้อเท็จจริงที่ไม่มีหลักฐานรองรับ "
+                "ถ้าข้อมูลยังไม่พอ ให้บอกอย่างตรงไปตรงมาว่ายังตอบได้ไม่ครบและถามผู้ใช้เพิ่มเพียงหนึ่งประเด็น"
+            ),
+        }
+
+    return {
+        "role": "system",
+        "content": (
+            "คำแนะนำเพิ่มเติมสำหรับคำถามเชิงข้อมูล: หากไม่มีข้อมูลที่ยืนยันได้เพียงพอ อย่าคาดเดาหรือแต่งข้อเท็จจริงเฉพาะเจาะจง "
+            "ให้ตอบอย่างระมัดระวัง ระบุความไม่แน่ใจสั้นๆ และถามผู้ใช้เพิ่มเพียงหนึ่งประเด็นเมื่อจำเป็น"
+        ),
+    }
+
+
+def generate_ai_response_with_timeout(
+    messages: List[Dict[str, str]],
+    timeout: int = 30,
+    user_id: str = "system",
+    risk_level: str = None,
+    rag_context: Optional[str] = None,
+) -> str:
     """เรียก AI API พร้อม timeout และคืนข้อความตอบกลับ
 
     Args:
@@ -1402,62 +1515,59 @@ def generate_ai_response_with_timeout(messages: List[Dict[str, str]], timeout: i
     # ตรวจสอบว่า filtered_messages มี system message อยู่แล้วหรือไม่ เพื่อไม่ให้ซ้ำซ้อน
     has_system_msg = any(msg.get("role") == "system" for msg in filtered_messages)
     if has_system_msg:
-        api_messages = filtered_messages
+        api_messages = list(filtered_messages)
     else:
-        api_messages = [SYSTEM_MESSAGE_CORE] + filtered_messages
+        api_messages = [SYSTEM_MESSAGE_CORE] + list(filtered_messages)
 
-    effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
+    user_message = _get_latest_user_message(filtered_messages)
 
-    # เลือก config: ถ้า risk_level == 'high' ใช้ CRISIS_CONFIG โดยตรง (ไม่ต้อง keyword match ซ้ำ)
     if risk_level == 'high':
         logging.info("Using CRISIS_CONFIG based on assess_risk result")
         dynamic_config = CRISIS_CONFIG
     else:
-        # ดึงข้อความล่าสุดจากผู้ใช้เพื่อเลือก config ที่เหมาะสม
-        user_message = ""
-        for msg in reversed(filtered_messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
         dynamic_config = get_dynamic_config(user_message, filtered_messages)
 
-    # --- Multi-AI Consensus Mode ---
-    if getattr(config, 'MULTI_AI_ENABLED', False):
-        try:
-            registry = get_multi_ai_registry()
-            if registry.count >= 2:
-                logging.info(f"[multi-ai] Using consensus mode with {registry.count} providers for user {user_id}")
-                consensus = multi_ai_chat(
-                    messages=api_messages,
-                    registry=registry,
-                    temperature=dynamic_config.get("temperature", 0.7),
-                    max_tokens=dynamic_config.get("max_tokens", 1024),
-                    timeout=effective_timeout,
-                )
-                logging.info(
-                    f"[multi-ai] Result: best={consensus.best_provider} "
-                    f"score={consensus.avg_score:.1f} "
-                    f"time={consensus.total_time_ms:.0f}ms "
-                    f"providers={consensus.providers_used}"
-                )
-                # Fire-and-forget: persist consensus result for dashboard
-                try:
-                    _save_multi_ai_log(user_id, consensus)
-                except Exception as log_err:
-                    logging.warning(f"[multi-ai] Failed to save log: {log_err}")
-                return consensus.best_response
-        except RuntimeError as e:
-            logging.warning(f"[multi-ai] All providers failed, falling back to Grok: {e}")
-        except Exception as e:
-            logging.error(f"[multi-ai] Unexpected error, falling back to Grok: {e}")
+    if dynamic_config == INFO_CONFIG:
+        grounding_message = _build_info_grounding_message(bool(rag_context and rag_context.strip()))
+        if api_messages and api_messages[0].get("role") == "system":
+            api_messages.insert(1, grounding_message)
+        else:
+            api_messages.insert(0, grounding_message)
 
-    # --- Single-provider mode (Grok) ---
+    if rag_context and rag_context.strip():
+        rag_message = {
+            "role": "system",
+            "content": (
+                "บริบทความรู้จากระบบ (สำหรับ AI — ห้ามเปิดเผยแหล่งที่มาหรือชื่อไฟล์ให้ผู้ใช้):\n"
+                f"{rag_context.strip()}\n\n"
+                "คำแนะนำ: ให้ความสำคัญกับข้อมูลข้างต้นสูงกว่าความรู้ทั่วไปจาก training "
+                "นำมาสังเคราะห์ผสมผสานกับบริบทการสนทนาอย่างเป็นธรรมชาติ "
+                "หากข้อมูลนี้ไม่เพียงพอหรือไม่เกี่ยวข้อง ให้ตอบอย่างระมัดระวังและถามผู้ใช้เพิ่มเติม"
+            ),
+        }
+        if api_messages and api_messages[0].get("role") == "system":
+            api_messages.insert(1, rag_message)
+        else:
+            api_messages.insert(0, rag_message)
+
+    effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
+
+    # --- Unified AI call (multi-AI consensus or single-provider via call_ai) ---
+
+    def _on_consensus(consensus):
+        try:
+            _save_multi_ai_log(user_id, consensus)
+        except Exception as log_err:
+            logging.warning(f"[multi-ai] Failed to save log: {log_err}")
 
     def _call() -> str:
-        return _xai_circuit_breaker.call(
-            grok_client.send_chat,
+        return call_ai(
             messages=api_messages,
             model=config.XAI_MODEL,
+            timeout=effective_timeout,
+            circuit_breaker=_xai_circuit_breaker,
+            on_consensus=_on_consensus,
+            _config=config,
             **dynamic_config,
         )
 
@@ -1680,7 +1790,7 @@ def send_system_notification(user_id: str, used_fallback: bool, had_error: bool)
         except Exception as e:
             logging.debug(f"Failed to send system notification to {user_id}: {e}")
             
-    threading.Thread(target=send_delayed, daemon=True).start()
+    _submit_background_task('system_notification', send_delayed)
 
 
 def handle_chatbot_error(error: ChatbotError, user_id: str, user_message: str, reply_token: Optional[str] = None):
@@ -1817,7 +1927,11 @@ def send_rate_limit_notification(user_id: str, wait_time: int):
         message = (
             f"⏳ ขออภัยครับ ระบบกำลังประมวลผลหนัก\n"
             f"กรุณารอประมาณ {wait_time} วินาที แล้วลองใหม่อีกครั้ง\n\n"
-            "ใจดีจะรีบกลับมาคุยกับคุณโดยเร็วที่สุดนะครับ 💚"
+            "ใจดียังคงอยู่ที่นี่และพร้อมรับฟังคุณ "
+            "กรุณาลองพูดคุยกับใจดีอีกครั้งในอีกสักครู่นะครับ\n\n"
+            "หากต้องการความช่วยเหลือเร่งด่วน:\n"
+            "📞 สายด่วนยาเสพติด: 1165\n"
+            "📞 สายด่วนสุขภาพจิต: 1323"
         )
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
     except Exception as e:
@@ -1908,6 +2022,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             )
             return True
 
+        cache_key = f"registered:{user_id}"
         try:
             skip_code = 'SKIP' + ''.join(random.choices(string.digits, k=6))
 
@@ -1919,7 +2034,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             now = datetime.now()
             form_data_json = json.dumps({
                 "full_data": {},
-                "ai_summary": "",
+                "ai_summary": "",  # จะถูกอัปเดทภายหลังโดย background thread
                 "skip_verify": True,
                 "processed_at": now.isoformat()
             })
@@ -1928,13 +2043,13 @@ def handle_command_with_processing(user_id, command, reply_token=None):
                 (skip_code, user_id, now, now, 'verified', form_data_json)
             )
 
-            # Invalidate registration cache
+            logging.info(f"ผู้ใช้ {user_id} ข้ามการยืนยันตัวตนด้วยคำสั่ง /skipverify (code: {skip_code})")
+
+            # Invalidate registration cache so subsequent checks see the new status immediately
             try:
-                redis_client.setex(f"registered:{user_id}", 300, '1')
+                redis_client.setex(cache_key, 300, '1')
             except Exception:
                 pass
-
-            logging.info(f"ผู้ใช้ {user_id} ข้ามการยืนยันตัวตนด้วยคำสั่ง /skipverify (code: {skip_code})")
 
             send_final_response(
                 user_id,
@@ -1956,32 +2071,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
 
     response_text = None
 
-    if normalized == '/reset':
-        db.clear_user_history(user_id)
-        redis_client.delete(f"chat_session:{user_id}")
-        redis_client.delete(f"session_tokens:{user_id}")
-        redis_client.zrem('follow_up_queue', user_id)
-        redis_client.delete(f"last_follow_up:{user_id}")
-        redis_client.delete(f"first_interaction:{user_id}")
-        response_text = (
-            "🔄 ล้างประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
-            "เราสามารถเริ่มต้นการสนทนาใหม่ได้ทันที\n"
-            "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีครับ?"
-        )
-
-    elif normalized == '/optimize':
-        token_count_before = get_session_token_count(user_id)
-        hybrid_context_management(user_id, TOKEN_THRESHOLD)
-        token_count_after = get_session_token_count(user_id)
-
-        response_text = (
-            f"🔄 ปรับปรุงประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
-            f"จำนวนโทเค็น: {token_count_before} → {token_count_after} ({(token_count_before - token_count_after)} ลดลง)\n\n"
-            "ประวัติการสนทนาสำคัญยังคงถูกเก็บไว้ และบอทยังเข้าใจบริบทการสนทนาของเรา\n"
-            "เราสามารถสนทนาต่อได้ตามปกติครับ"
-        )
-
-    elif normalized == '/tokens':
+    if normalized == '/tokens':
         token_count = get_session_token_count(user_id)
         max_tokens = TOKEN_THRESHOLD
         percentage = (token_count / max_tokens) * 100 if max_tokens else 0
@@ -1991,7 +2081,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             f"โทเค็นในเซสชันปัจจุบัน: {token_count:,}\n"
             f"ขีดจำกัด: {max_tokens:,}\n"
             f"เปอร์เซ็นต์การใช้งาน: {percentage:.1f}%\n\n"
-            f"{'⚠️ ใกล้ถึงขีดจำกัด โปรดใช้ /optimize เพื่อปรับปรุงประวัติ' if percentage > 80 else '✅ อยู่ในเกณฑ์ปกติ'}"
+            f"{'⚠️ ใกล้ถึงขีดจำกัด ระบบจะปรับปรุงประวัติให้อัตโนมัติ' if percentage > 80 else '✅ อยู่ในเกณฑ์ปกติ'}"
         )
 
     elif normalized == '/followup':
@@ -1999,8 +2089,8 @@ def handle_command_with_processing(user_id, command, reply_token=None):
 
     elif normalized == '/help':
         response_text = (
-            "สวัสดีครับ 👋 ฉันคือน้องใจดี ผู้ช่วยดูแลและให้คำปรึกษาสำหรับผู้ที่ต้องการเลิกใช้สารเสพติด"
-            "💬 ฉันสามารถช่วยคุณได้ดังนี้:\n"
+            "สวัสดีครับ 👋 ผมคือน้องใจดี ผู้ช่วยดูแลและให้คำปรึกษาสำหรับผู้ที่ต้องการเลิกใช้สารเสพติด"
+            "💬 ผมสามารถช่วยคุณได้ดังนี้:\n"
             "- พูดคุยและให้กำลังใจในการเลิกใช้สารเสพติด\n"
             "- ให้คำปรึกษาเกี่ยวกับวิธีรับมือความอยากและอาการถอน\n"
             "- ให้ข้อมูลเกี่ยวกับผลกระทบของสารเสพติดและการรักษา\n"
@@ -2008,7 +2098,6 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             "🛠️ คำสั่งที่มีให้ใช้:\n"
             "📥 /register - วิธีลงทะเบียนใช้งาน\n"
             "✅ /verify <รหัส> - ยืนยันตัวตนด้วยรหัส 6 หลัก\n"
-            "🧠 /optimize - ปรับปรุงประวัติการสนทนาให้มีประสิทธิภาพ\n"
             "🪙 /tokens - ตรวจสอบการใช้งานโทเค็นในเซสชันปัจจุบัน\n"
             "📊 /status - ดูสรุปสถานะการสนทนาและการใช้โทเค็น\n"
             "📈 /progress - ดูรายงานความก้าวหน้าและแนวทางถัดไป\n"
@@ -2018,16 +2107,16 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             "🔒 /privacy - ดูนโยบายความเป็นส่วนตัว\n"
             "🗑️ /deletedata - ลบข้อมูลทั้งหมดของคุณ\n"
             "❓ /help - แสดงเมนูช่วยเหลือนี้\n\n"
-            "💡 ตัวอย่างคำถามที่สามารถถามฉันได้:\n"
-            "- \"ช่วยประเมินการใช้สารเสพติดของฉันหน่อย\"\n"
+            "💡 ตัวอย่างคำถามที่สามารถถามผมได้:\n"
+            "- \"ช่วยประเมินการใช้สารเสพติดของผมหน่อย\"\n"
             "- \"ผลกระทบของยาบ้าต่อร่างกายมีอะไรบ้าง\"\n"
             "- \"มีเทคนิคจัดการความอยากยาอย่างไร\"\n"
-            "- \"ฉันควรทำอย่างไรเมื่อรู้สึกอยากกลับไปใช้สารอีก\"\n\n"
+            "- \"ผมควรทำอย่างไรเมื่อรู้สึกอยากกลับไปใช้สารอีก\"\n\n"
             "📧 ติดต่อทีมงาน:\n"
             "หากพบข้อผิดพลาด (บัค) หรือมีข้อเสนอแนะ สามารถติดต่อได้ที่:\n"
             "🔧 ผู้พัฒนาระบบ: pahnkcn@gmail.com\n"
             "📖 ผู้วิจัย: Std6548097@pcm.ac.th\n\n"
-            "เริ่มพูดคุยกับฉันได้เลยนะครับ ฉันพร้อมรับฟังและช่วยเหลือคุณ 💚"
+            "เริ่มพูดคุยกับผมได้เลยนะครับ ผมพร้อมรับฟังและช่วยเหลือคุณ 💚"
         )
 
     elif normalized == '/status':
@@ -2049,7 +2138,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
             f"▫️ โทเค็นในฐานข้อมูล: {total_db_tokens:,}\n"
             "  (ผลรวมของแต่ละข้อความที่บันทึก)\n\n"
             "💚 น้องใจดีพร้อมให้คำปรึกษาและสนับสนุนคุณตลอดเส้นทางการเลิกสารเสพติด\n"
-            "💬 มีคำถามหรือต้องการความช่วยเหลือ เพียงพิมพ์บอกฉันได้เลยครับ\n\n"
+            "💬 มีคำถามหรือต้องการความช่วยเหลือ เพียงพิมพ์บอกผมได้เลยครับ\n\n"
             "ℹ️ เคล็ดลับ: ต้องการดูรายงานความก้าวหน้าของคุณ พิมพ์ /progress"
         )
 
@@ -2145,12 +2234,14 @@ def handle_response_timing(start_time, animation_success):
         # หน่วงเล็กน้อยเพื่อให้ animation แสดงสักครู่ แต่ไม่นานเกินไป
         time.sleep(2 - elapsed_time)
 
-# เส้นทาง Flask
 @app.route("/callback", methods=['POST'])
 @limiter.limit("10/minute")
 def callback():
     # รับค่า X-Line-Signature header
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
+    if not signature:
+        app.logger.warning("Missing X-Line-Signature header")
+        abort(400)
 
     # รับเนื้อหาคำขอเป็นข้อความ
     body = request.get_data(as_text=True)
@@ -2216,13 +2307,27 @@ def add_verification_code():
     if not expected_key:
         logging.error("FORM_WEBHOOK_KEY environment variable is not set")
         return jsonify({"success": False, "error": "Server configuration error"}), 500
-    api_key = request.json.get('api_key', '')
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
+
+    api_key = payload.get('api_key', '')
+    if not isinstance(api_key, str):
+        api_key = str(api_key)
     if not hmac.compare_digest(api_key, expected_key):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     # รับข้อมูลจาก request
-    code = request.json.get('code', '')
-    full_form_data = request.json.get('full_form_data', {})
+    code = payload.get('code', '')
+    if not isinstance(code, str):
+        code = str(code)
+    code = code.strip()
+
+    full_form_data = payload.get('full_form_data', {})
+    if full_form_data is None:
+        full_form_data = {}
+    if not isinstance(full_form_data, dict):
+        return jsonify({"success": False, "error": "Invalid form data"}), 400
 
     if not code or not code.isdigit() or len(code) != 6:
         return jsonify({"success": False, "error": "Invalid verification code"}), 400
@@ -2258,12 +2363,12 @@ def add_verification_code():
 
         # เริ่ม background thread เพื่อสรุปข้อมูลด้วย AI
         if full_form_data:
-            summary_thread = threading.Thread(
-                target=process_ai_summary_async,
-                args=(code, full_form_data),
-                daemon=True
+            _submit_background_task(
+                'form_summary',
+                process_ai_summary_async,
+                code,
+                full_form_data,
             )
-            summary_thread.start()
             logging.info(f"เริ่ม background thread เพื่อสรุปข้อมูล form สำหรับรหัส: {code}")
 
         # ตอบกลับทันทีโดยไม่ต้องรอ AI summary
@@ -2299,40 +2404,6 @@ def check_line_api_health():
         bot_info = line_bot_api.get_bot_info()
         return bool(bot_info.display_name)
     except Exception:
-        return False
-
-_grok_health_cache: Dict[str, Any] = {'healthy': None, 'checked_at': 0.0}
-_GROK_HEALTH_CACHE_TTL = 300  # 5 นาที
-_grok_health_lock = threading.Lock()
-
-def check_grok_api_health():
-    """ตรวจสอบการเชื่อมต่อ xAI Grok API (cached เพื่อลดค่าใช้จ่ายโทเค็น)"""
-    now = time.time()
-
-    # ถ้า circuit breaker เปิดอยู่ → ไม่ต้องตรวจสอบจริง
-    if _xai_circuit_breaker.state.value == 'open':
-        return False
-
-    # ใช้ค่า cache ถ้ายังไม่หมดอายุ (check under lock to prevent thundering herd)
-    with _grok_health_lock:
-        if _grok_health_cache['healthy'] is not None and (now - _grok_health_cache['checked_at']) < _GROK_HEALTH_CACHE_TTL:
-            return _grok_health_cache['healthy']
-
-    try:
-        _ = grok_client.send_chat(
-            messages=[{"role": "user", "content": "ping"}],
-            model=config.XAI_MODEL,
-            max_tokens=1,
-        )
-        with _grok_health_lock:
-            _grok_health_cache['healthy'] = True
-            _grok_health_cache['checked_at'] = now
-        return True
-    except Exception as e:
-        logging.debug(f"xAI Grok API health check failed: {str(e)}")
-        with _grok_health_lock:
-            _grok_health_cache['healthy'] = False
-            _grok_health_cache['checked_at'] = now
         return False
 
 def get_uptime():
@@ -2432,34 +2503,57 @@ scheduler = BackgroundScheduler()
 
 def shutdown_scheduler(wait=True, reason="unknown"):
     """ปิดตัวกำหนดการของ APScheduler อย่างปลอดภัย"""
+    global _scheduler_initialized
     if not scheduler.running:
+        _scheduler_initialized = False
         logging.debug(f"ข้ามการปิดตัวกำหนดการ ({reason}): ยังไม่ได้เริ่มทำงาน")
         return
     try:
         scheduler.shutdown(wait=wait)
+        _scheduler_initialized = False
         logging.info(f"ปิดตัวกำหนดการเรียบร้อย ({reason})")
     except SchedulerNotRunningError:
+        _scheduler_initialized = False
         logging.debug(f"ตัวกำหนดการถูกปิดแล้ว ({reason})")
     except Exception as exc:
         logging.error(f"เกิดข้อผิดพลาดในการปิดตัวกำหนดการ ({reason}): {exc}")
 
 # เพิ่มงานตัวกำหนดการ
 _scheduler_initialized = False
+_FOLLOW_UP_JOB_ID = 'follow_up_dispatch'
+_PROACTIVE_CHECKIN_JOB_ID = 'proactive_checkin'
 
 def init_scheduler():
     global _scheduler_initialized
-    if _scheduler_initialized:
+    if _scheduler_initialized or scheduler.running:
+        _scheduler_initialized = True
         logging.debug("Scheduler already initialized, skipping")
         return
-    _scheduler_initialized = True
-    scheduler.add_job(check_and_send_follow_ups, 'interval', minutes=30)
-    from .services.proactive_checkin import run_proactive_checkins
-    scheduler.add_job(run_proactive_checkins, 'interval', hours=6, id='proactive_checkin')
-    scheduler.start()
-    logging.info("ตัวกำหนดการเริ่มต้นแล้ว: ติดตามทุก 30 นาที, เช็คอินเชิงรุกทุก 6 ชม.")
+    try:
+        scheduler.add_job(
+            check_and_send_follow_ups,
+            'interval',
+            minutes=30,
+            id=_FOLLOW_UP_JOB_ID,
+            replace_existing=True,
+        )
+        from .services.proactive_checkin import run_proactive_checkins
+        scheduler.add_job(
+            run_proactive_checkins,
+            'interval',
+            hours=6,
+            id=_PROACTIVE_CHECKIN_JOB_ID,
+            replace_existing=True,
+        )
+        scheduler.start()
+        _scheduler_initialized = True
+        logging.info("ตัวกำหนดการเริ่มต้นแล้ว: ติดตามทุก 30 นาที, เช็คอินเชิงรุกทุก 6 ชม.")
 
-    # การจัดการการปิดอย่างถูกต้อง
-    atexit.register(lambda: shutdown_scheduler(reason='atexit'))
+        # การจัดการการปิดอย่างถูกต้อง
+        atexit.register(lambda: shutdown_scheduler(reason='atexit'))
+    except Exception:
+        _scheduler_initialized = False
+        raise
 
 # ตัวจัดการการปิดอย่างสง่างาม
 def handle_shutdown(sig=None, frame=None):
@@ -2474,6 +2568,12 @@ def handle_shutdown(sig=None, frame=None):
         logging.info("ปิด AI executor เรียบร้อย")
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการปิด AI executor: {str(e)}")
+
+    try:
+        _BACKGROUND_EXECUTOR.shutdown(wait=False)
+        logging.info("ปิด background executor เรียบร้อย")
+    except Exception as e:
+        logging.error(f"เกิดข้อผิดพลาดในการปิด background executor: {str(e)}")
 
     # ปิดการเชื่อมต่อ Redis
     try:

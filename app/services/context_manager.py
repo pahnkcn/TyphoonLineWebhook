@@ -13,7 +13,8 @@ from ..config import (
     SUMMARY_GENERATION_CONFIG,
     TOKEN_THRESHOLD,
 )
-from ..llm import grok_client
+from ..llm.ai_caller import call_ai
+from ..risk_assessment import assess_risk
 from ..session_manager import (
     get_chat_session,
     save_chat_session,
@@ -68,7 +69,7 @@ def summarize_conversation_chunk(chunk: List[Tuple], config: Any) -> str:
 **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
@@ -129,7 +130,7 @@ def summarize_conversation_history(history: List[Tuple], config: Any) -> str:
 ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
@@ -175,7 +176,7 @@ def summarize_by_topic(history: List[Tuple], config: Any) -> str:
 แต่ละหัวข้อควรครอบคลุมประเด็นสำคัญที่พูดถึงโดยมีใจความชัดเจน กระชับ และเก็บรายละเอียดสำคัญไว้
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": topic_prompt}
@@ -230,6 +231,61 @@ def filter_messages_for_api(messages: List[Dict[str, str]]) -> List[Dict[str, st
     return filtered_messages
 
 
+def _split_context_messages(messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
+    preserved_messages: List[Dict[str, str]] = []
+    summary_messages: List[Dict[str, str]] = []
+    dialogue_messages: List[Dict[str, str]] = []
+
+    for message in messages:
+        role = message.get("role")
+        if role in {"user", "assistant"}:
+            dialogue_messages.append({"role": role, "content": message.get("content", "")})
+        elif role == "system_summary":
+            content = str(message.get("content", "")).strip()
+            if content:
+                summary_messages.append({"role": "system_summary", "content": content})
+        else:
+            preserved_messages.append({"role": role, "content": message.get("content", "")})
+
+    return preserved_messages, summary_messages, dialogue_messages
+
+
+def _build_dialogue_buckets(messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], List[Tuple[int, str, str]]]:
+    passthrough_messages: List[Dict[str, str]] = []
+    normal_pairs: List[Tuple[int, str, str]] = []
+    pending_user: Optional[str] = None
+
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content", "")
+
+        if role == "user":
+            if pending_user is not None:
+                passthrough_messages.append({"role": "user", "content": pending_user})
+            pending_user = content
+            continue
+
+        if role != "assistant":
+            continue
+
+        if pending_user is None:
+            passthrough_messages.append({"role": "assistant", "content": content})
+            continue
+
+        risk_level, _ = assess_risk(pending_user)
+        if is_important_message(pending_user, content, risk_level=risk_level):
+            passthrough_messages.append({"role": "user", "content": pending_user})
+            passthrough_messages.append({"role": "assistant", "content": content})
+        else:
+            normal_pairs.append((len(normal_pairs), pending_user, content))
+        pending_user = None
+
+    if pending_user is not None:
+        passthrough_messages.append({"role": "user", "content": pending_user})
+
+    return passthrough_messages, normal_pairs
+
+
 def optimize_context(
     user_id: str,
     config: Any,
@@ -259,43 +315,34 @@ def optimize_context(
         if session_tokens < max_tokens:
             return current_history
 
+        preserved_messages, existing_summary_messages, dialogue_messages = _split_context_messages(current_history)
+
         logging.info(
             f"เซสชันใกล้เต็ม context window ({session_tokens} tokens) สำหรับผู้ใช้ {user_id}, กำลังจัดการประวัติ..."
         )
 
-        if len(current_history) <= keep_recent * 2:
+        if len(dialogue_messages) <= keep_recent * 2:
             return current_history
 
-        recent_messages = current_history[-keep_recent * 2:]
-        older_messages = current_history[:-keep_recent * 2]
+        recent_messages = dialogue_messages[-keep_recent * 2:]
+        older_messages = dialogue_messages[:-keep_recent * 2]
 
-        # แยกข้อความสำคัญออกจากข้อความปกติ
-        important_messages: List[Dict[str, str]] = []
-        normal_pairs: List[Tuple] = []
+        passthrough_messages, normal_pairs = _build_dialogue_buckets(older_messages)
 
-        for i in range(0, len(older_messages), 2):
-            if i + 1 < len(older_messages):
-                user_msg = older_messages[i].get("content", "")
-                bot_resp = older_messages[i + 1].get("content", "")
-                if is_important_message(user_msg, bot_resp):
-                    important_messages.append({"role": "user", "content": user_msg})
-                    important_messages.append({"role": "assistant", "content": bot_resp})
-                else:
-                    normal_pairs.append((len(normal_pairs), user_msg, bot_resp))
-
-        # สรุปข้อความปกติ
         summary = ""
         if normal_pairs:
             summary = summarize_conversation_history(normal_pairs, config)
 
-        # รวมประวัติใหม่
         new_history: List[Dict[str, str]] = []
+        new_history.extend(preserved_messages)
         if summary:
             new_history.append({
                 "role": "system_summary",
                 "content": f"สรุปการสนทนาก่อนหน้า: {summary}",
             })
-        new_history.extend(important_messages)
+        else:
+            new_history.extend(existing_summary_messages)
+        new_history.extend(passthrough_messages)
         new_history.extend(recent_messages)
 
         save_chat_session(user_id, new_history)

@@ -12,6 +12,7 @@ services:
       - MYSQL_PORT=3306
       - TZ=Asia/Bangkok
       - ENVIRONMENT=production
+      - ENABLE_SCHEDULER=1
     env_file: .env
     depends_on:
       redis:
@@ -20,6 +21,7 @@ services:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
+      - ./knowledge_docs:/app/knowledge_docs
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s

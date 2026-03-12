@@ -1,4 +1,4 @@
-"""Dashboard routes — extracted from app_main.py as a Flask Blueprint."""
+﻿"""Dashboard routes â€” extracted from app_main.py as a Flask Blueprint."""
 import csv
 import hashlib
 import io
@@ -8,6 +8,7 @@ import hmac
 import logging
 from datetime import datetime, timedelta
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, request, jsonify, render_template, Response
@@ -19,7 +20,13 @@ dashboard_bp = Blueprint('dashboard', __name__)
 
 # CORS for dashboard API endpoints only (not the whole app)
 _dashboard_cors_origins = os.getenv('DASHBOARD_CORS_ORIGINS', '').split(',') if os.getenv('DASHBOARD_CORS_ORIGINS') else []
-CORS(dashboard_bp, resources={r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]}})
+CORS(
+    dashboard_bp,
+    resources={
+        r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]},
+        r"/api/knowledge/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "POST", "OPTIONS"]},
+    },
+)
 
 
 @dashboard_bp.after_request
@@ -38,19 +45,34 @@ _DASHBOARD_API_KEY: str = ''
 _HIGH_RISK_KEYWORDS = set()
 _MEDIUM_RISK_KEYWORDS = set()
 _GENERAL_RISK_LEVEL = 'general'
+_knowledge_base = None
 
 
-def init_dashboard(db, db_manager, redis_client, general_risk_level='general'):
+def init_dashboard(db, db_manager, redis_client, general_risk_level='general', knowledge_base=None):
     """Wire runtime dependencies into the dashboard module."""
-    global _db, _db_manager, _redis_client, _DASHBOARD_API_KEY
+    global _db, _db_manager, _redis_client, _DASHBOARD_API_KEY, _knowledge_base
     global _HIGH_RISK_KEYWORDS, _MEDIUM_RISK_KEYWORDS, _GENERAL_RISK_LEVEL
     _db = db
     _db_manager = db_manager
     _redis_client = redis_client
+    _knowledge_base = knowledge_base
     _DASHBOARD_API_KEY = os.getenv('DASHBOARD_API_KEY', '')
     _HIGH_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('high_risk', [])}
     _MEDIUM_RISK_KEYWORDS = {kw.lower() for kw in RISK_KEYWORDS.get('medium_risk', [])}
     _GENERAL_RISK_LEVEL = general_risk_level
+
+
+def _sanitize_filename(filename: str) -> str:
+    cleaned = os.path.basename(filename or '').strip()
+    if not cleaned:
+        return ''
+    return ''.join(ch for ch in cleaned if ch.isalnum() or ch in {'.', '_', '-'})
+
+
+def _ensure_knowledge_base():
+    if _knowledge_base is None:
+        return False, (jsonify({'error': 'rag_unavailable', 'message': 'RAG knowledge base is disabled or unavailable'}), 503)
+    return True, None
 
 
 def _require_dashboard_auth():
@@ -64,27 +86,73 @@ def _require_dashboard_auth():
             return True, None
     token = request.args.get('api_key', '')
     if token and hmac.compare_digest(token, _DASHBOARD_API_KEY):
-        logging.warning("Dashboard API key passed via query parameter — use Authorization header instead")
+        logging.warning("Dashboard API key passed via query parameter â€” use Authorization header instead")
         return True, None
     return False, (jsonify({"error": "Unauthorized"}), 401)
+
+
+def _clamp_lookback_days(value: int) -> int:
+    return max(1, min(int(value or 0), 180))
+
+
+def _lookback_window_start(lookback_days: int, now: Optional[datetime] = None) -> datetime:
+    reference = now or datetime.now()
+    days = _clamp_lookback_days(lookback_days)
+    start_day = (reference - timedelta(days=days - 1)).date()
+    return datetime.combine(start_day, datetime.min.time())
+
+
+def _coerce_requested_datetime(
+    value: Optional[str],
+    *,
+    default: datetime,
+    end_of_day: bool = False,
+) -> datetime:
+    if not value:
+        return default
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        if value.endswith('Z'):
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        else:
+            raise
+
+    if 'T' not in value and ' ' not in value:
+        parsed = datetime.combine(parsed.date(), datetime.max.time() if end_of_day else datetime.min.time())
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+
+    return parsed
 
 
 def _parse_progress_timestamp(value: Any) -> Optional[datetime]:
     if value is None:
         return None
+
+    parsed: Optional[datetime] = None
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
+        parsed = value
+    elif isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             if value.endswith('Z'):
                 try:
-                    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
                 except ValueError:
                     return None
-    return None
+            else:
+                return None
+    else:
+        return None
 
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+
+    return parsed
 
 def _classify_keyword_risk(keyword: str) -> str:
     key_lower = keyword.lower()
@@ -96,6 +164,7 @@ def _classify_keyword_risk(keyword: str) -> str:
 
 
 def _collect_dashboard_progress_metrics(
+    cutoff: Optional[datetime] = None,
     lookback_days: int = 30,
     per_user_limit: int = 5,
     keyword_limit: int = 10,
@@ -113,12 +182,14 @@ def _collect_dashboard_progress_metrics(
             'risk_trend': [],
         }
 
-    cutoff = datetime.now() - timedelta(days=max(1, lookback_days))
+    effective_cutoff = cutoff or _lookback_window_start(lookback_days)
+    limit_per_user = max(1, per_user_limit)
     try:
         for key in _redis_client.scan_iter('progress:*'):
+            if isinstance(key, bytes):
+                key = key.decode('utf-8', errors='ignore')
             user_id = key.split(':', 1)[1] if ':' in key else key
             entries = _redis_client.lrange(key, 0, -1)
-            limit_per_user = max(1, per_user_limit)
             recent_events: List[Dict[str, Any]] = []
             for raw in entries:
                 try:
@@ -127,32 +198,32 @@ def _collect_dashboard_progress_metrics(
                     continue
 
                 timestamp = _parse_progress_timestamp(entry.get('timestamp'))
-                raw_level = entry.get('risk_level')
-                risk_level = normalize_risk_level(raw_level)
+                if timestamp is None or timestamp < effective_cutoff:
+                    continue
+
+                risk_level = normalize_risk_level(entry.get('risk_level'))
                 keywords = entry.get('keywords') or []
                 risk_counter[risk_level] += 1
 
-                if timestamp and timestamp >= cutoff:
-                    day_key = timestamp.date().isoformat()
-                    if day_key not in daily_risk:
-                        daily_risk[day_key] = Counter()
-                    daily_risk[day_key][risk_level] += 1
+                day_key = timestamp.date().isoformat()
+                if day_key not in daily_risk:
+                    daily_risk[day_key] = Counter()
+                daily_risk[day_key][risk_level] += 1
 
                 if risk_level in ('high', 'medium') and len(recent_events) < limit_per_user:
                     recent_events.append({
-                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'timestamp': timestamp.isoformat(),
                         'risk_level': risk_level,
                         'keywords': keywords,
                     })
 
-                if timestamp and timestamp >= cutoff:
-                    for keyword in keywords:
-                        normalized = keyword.strip()
-                        if not normalized:
-                            continue
-                        lowered = normalized.lower()
-                        keyword_counter[lowered] += 1
-                        display_lookup.setdefault(lowered, normalized)
+                for keyword in keywords:
+                    normalized = keyword.strip()
+                    if not normalized:
+                        continue
+                    lowered = normalized.lower()
+                    keyword_counter[lowered] += 1
+                    display_lookup.setdefault(lowered, normalized)
 
             if recent_events:
                 user_progress[user_id] = recent_events
@@ -196,12 +267,9 @@ def _collect_dashboard_progress_metrics(
         'risk_trend': risk_trend,
     }
 
-
-# ── Routes ──────────────────────────────────────────────────────────
-
 @dashboard_bp.route('/dashboard', methods=['GET'])
 def dashboard_page():
-    return render_template('dashboard.html')
+    return render_template('dashboard.html', dashboard_auth_required=bool(_DASHBOARD_API_KEY))
 
 
 @dashboard_bp.route('/api/dashboard/insights', methods=['GET'])
@@ -212,20 +280,21 @@ def get_dashboard_insights():
         return auth_error
     try:
         user_limit = request.args.get('limit', default=10, type=int) or 10
-        lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
+        lookback_days = _clamp_lookback_days(request.args.get('lookback_days', default=30, type=int) or 30)
         keyword_limit = request.args.get('keyword_limit', default=10, type=int) or 10
 
         user_limit = max(1, min(user_limit, 100))
-        lookback_days = max(1, min(lookback_days, 180))
         keyword_limit = max(1, min(keyword_limit, 50))
+        generated_at = datetime.now()
+        cutoff = _lookback_window_start(lookback_days, now=generated_at)
 
         progress_metrics = _collect_dashboard_progress_metrics(
-            lookback_days=lookback_days,
+            cutoff=cutoff,
             per_user_limit=5,
             keyword_limit=keyword_limit,
         )
 
-        overview_raw = _db.get_dashboard_overview() or {}
+        overview_raw = _db.get_dashboard_overview(cutoff=cutoff) or {}
         overview = {
             'total_conversations': int(overview_raw.get('total_conversations', 0) or 0),
             'unique_users': int(overview_raw.get('unique_users', 0) or 0),
@@ -237,13 +306,17 @@ def get_dashboard_insights():
                 'SELECT COUNT(*) FROM follow_ups WHERE status != %s',
                 ('completed',),
             )
-            active_followups = int(followup_result[0][0]) if followup_result else 0
+            if followup_result:
+                active_row = followup_result[0]
+                active_followups = int(active_row[0] if not isinstance(active_row, dict) else next(iter(active_row.values())))
+            else:
+                active_followups = 0
         except Exception as exc:
             logging.warning('Could not fetch follow-up metrics: %s', exc)
             active_followups = 0
         overview['active_follow_ups'] = active_followups
 
-        user_summaries = _db.get_recent_user_summaries(limit=user_limit) or []
+        user_summaries = _db.get_recent_user_summaries(limit=None, cutoff=cutoff) or []
         user_progress_map = progress_metrics.get('user_progress', {})
         formatted_users: List[Dict[str, Any]] = []
 
@@ -267,9 +340,9 @@ def get_dashboard_insights():
             formatted['recent_risk_events'] = user_progress_map.get(
                 formatted.get('user_id'), []
             )
-
             formatted_users.append(formatted)
 
+        displayed_users = formatted_users[:user_limit]
         total_users = len(formatted_users)
         total_messages_all = sum(user['total_messages'] for user in formatted_users)
         important_messages_all = sum(user['important_messages'] for user in formatted_users)
@@ -304,11 +377,9 @@ def get_dashboard_insights():
             else 0.0
         )
 
-        trend_window = min(max(lookback_days, 7), 30)
-        daily_totals = _db.get_recent_daily_message_totals(days=trend_window) or []
-
-        retention_buckets = _db.get_retention_buckets() or []
-        conversation_depth = _db.get_conversation_depth_trend(days=trend_window) or []
+        daily_totals = _db.get_recent_daily_message_totals(days=lookback_days, cutoff=cutoff) or []
+        retention_buckets = _db.get_retention_buckets(cutoff=cutoff) or []
+        conversation_depth = _db.get_conversation_depth_trend(days=lookback_days, cutoff=cutoff) or []
 
         infographic = {
             'engagement': {
@@ -336,7 +407,11 @@ def get_dashboard_insights():
         })
 
         response_payload = {
-            'generated_at': datetime.now().isoformat(),
+            'generated_at': generated_at.isoformat(),
+            'window': {
+                'start': cutoff.isoformat(),
+                'end': generated_at.isoformat(),
+            },
             'parameters': {
                 'user_limit': user_limit,
                 'lookback_days': lookback_days,
@@ -349,7 +424,11 @@ def get_dashboard_insights():
             'infographic': infographic,
             'retention_buckets': retention_buckets,
             'conversation_depth': conversation_depth,
-            'users': formatted_users,
+            'users': displayed_users,
+            'users_meta': {
+                'displayed': len(displayed_users),
+                'total': total_users,
+            },
         }
         return jsonify(response_payload)
 
@@ -359,7 +438,6 @@ def get_dashboard_insights():
             'error': 'dashboard_generation_failed',
             'message': 'Dashboard insights are unavailable at the moment.',
         }), 500
-
 
 @dashboard_bp.route('/api/dashboard/users/<user_id>/history', methods=['GET'])
 def get_dashboard_user_history(user_id: str):
@@ -372,10 +450,16 @@ def get_dashboard_user_history(user_id: str):
 
     limit = request.args.get('limit', default=50, type=int) or 50
     limit = max(10, min(limit, 200))
+    lookback_days = request.args.get('lookback_days', type=int)
+    if lookback_days:
+        lookback_days = _clamp_lookback_days(lookback_days)
+        cutoff = _lookback_window_start(lookback_days)
+    else:
+        cutoff = None
 
     try:
-        history = _db.get_user_conversation_feed(user_id, limit=limit) or []
-        summary = _db.get_user_snapshot(user_id) or {
+        history = _db.get_user_conversation_feed(user_id, limit=limit, cutoff=cutoff) or []
+        summary = _db.get_user_snapshot(user_id, cutoff=cutoff) or {
             'user_id': user_id,
             'total_messages': 0,
             'important_messages': 0,
@@ -389,7 +473,7 @@ def get_dashboard_user_history(user_id: str):
 
         risk_events: List[Dict[str, Any]] = []
         if _redis_client is not None:
-            raw_events = _redis_client.lrange(f"progress:{user_id}", 0, limit - 1)
+            raw_events = _redis_client.lrange(f"progress:{user_id}", 0, -1)
             for raw in raw_events:
                 try:
                     event = json.loads(raw)
@@ -397,29 +481,39 @@ def get_dashboard_user_history(user_id: str):
                     continue
 
                 timestamp = _parse_progress_timestamp(event.get('timestamp'))
+                if cutoff is not None and (timestamp is None or timestamp < cutoff):
+                    continue
+
                 normalized_level = normalize_risk_level(event.get('risk_level'))
                 risk_events.append({
                     'timestamp': timestamp.isoformat() if timestamp else event.get('timestamp'),
                     'risk_level': normalized_level,
                     'keywords': event.get('keywords') or [],
                 })
+                if len(risk_events) >= limit:
+                    break
 
+        generated_at = datetime.now()
         response_payload = {
-            'generated_at': datetime.now().isoformat(),
+            'generated_at': generated_at.isoformat(),
             'user_id': user_id,
             'summary': summary,
             'history': history,
             'risk_events': risk_events,
             'limit': limit,
+            'parameters': {
+                'lookback_days': lookback_days,
+            },
         }
+        if cutoff is not None:
+            response_payload['window'] = {'start': cutoff.isoformat(), 'end': generated_at.isoformat()}
         return jsonify(response_payload)
     except Exception as exc:
         logging.error('Error retrieving dashboard user history for %s: %s', user_id, exc, exc_info=True)
         return jsonify({
             'error': 'user_history_unavailable',
-            'message': 'ไม่สามารถดึงประวัติการสนทนาได้ในขณะนี้',
+            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸”à¸¶à¸‡à¸›à¸£à¸°à¸§à¸±à¸•à¸´à¸à¸²à¸£à¸ªà¸™à¸—à¸™à¸²à¹„à¸”à¹‰à¹ƒà¸™à¸‚à¸“à¸°à¸™à¸µà¹‰',
         }), 500
-
 
 @dashboard_bp.route('/api/dashboard/multi-ai-stats', methods=['GET'])
 def get_multi_ai_stats():
@@ -428,9 +522,9 @@ def get_multi_ai_stats():
     if not auth_ok:
         return auth_error
 
-    lookback_days = request.args.get('lookback_days', default=30, type=int) or 30
-    lookback_days = max(1, min(lookback_days, 180))
-    cutoff = datetime.now() - timedelta(days=lookback_days)
+    lookback_days = _clamp_lookback_days(request.args.get('lookback_days', default=30, type=int) or 30)
+    generated_at = datetime.now()
+    cutoff = _lookback_window_start(lookback_days, now=generated_at)
 
     try:
         # --- Summary ---
@@ -447,7 +541,8 @@ def get_multi_ai_stats():
 
         if total_evals == 0:
             return jsonify({
-                'generated_at': datetime.now().isoformat(),
+                'generated_at': generated_at.isoformat(),
+                'window': {'start': cutoff.isoformat(), 'end': generated_at.isoformat()},
                 'lookback_days': lookback_days,
                 'summary': {'total_evaluations': 0, 'avg_total_time_ms': 0, 'avg_best_score': 0},
                 'provider_wins': [],
@@ -455,6 +550,8 @@ def get_multi_ai_stats():
                 'provider_tokens': [],
                 'provider_response_times': [],
                 'daily_trend': [],
+                'provider_avg_times': [],
+                'processing_times': [],
             })
 
         # --- Provider wins (best_provider frequency) ---
@@ -620,7 +717,8 @@ def get_multi_ai_stats():
             })
 
         return jsonify({
-            'generated_at': datetime.now().isoformat(),
+            'generated_at': generated_at.isoformat(),
+            'window': {'start': cutoff.isoformat(), 'end': generated_at.isoformat()},
             'lookback_days': lookback_days,
             'summary': {
                 'total_evaluations': total_evals,
@@ -642,6 +740,76 @@ def get_multi_ai_stats():
             'error': 'multi_ai_stats_failed',
             'message': 'Multi-AI statistics are unavailable at the moment.',
         }), 500
+
+
+@dashboard_bp.route('/api/knowledge/stats', methods=['GET'])
+def get_knowledge_stats():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    try:
+        return jsonify(_knowledge_base.get_stats())
+    except Exception as exc:
+        logging.error('Error fetching knowledge stats: %s', exc, exc_info=True)
+        return jsonify({'error': 'knowledge_stats_failed'}), 500
+
+
+@dashboard_bp.route('/api/knowledge/reindex', methods=['POST'])
+def reindex_knowledge_docs():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    try:
+        result = _knowledge_base.ingest_directory(force_reindex=True)
+        return jsonify(result)
+    except Exception as exc:
+        logging.error('Knowledge reindex failed: %s', exc, exc_info=True)
+        return jsonify({'error': 'knowledge_reindex_failed'}), 500
+
+
+@dashboard_bp.route('/api/knowledge/upload', methods=['POST'])
+def upload_knowledge_file():
+    auth_ok, auth_error = _require_dashboard_auth()
+    if not auth_ok:
+        return auth_error
+
+    kb_ok, kb_error = _ensure_knowledge_base()
+    if not kb_ok:
+        return kb_error
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'missing_file'}), 400
+
+    uploaded_file = request.files['file']
+    safe_name = _sanitize_filename(uploaded_file.filename)
+    if not safe_name:
+        return jsonify({'error': 'invalid_filename'}), 400
+
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in {'.pdf', '.docx', '.txt', '.md'}:
+        return jsonify({'error': 'unsupported_file_type'}), 400
+
+    docs_dir = Path(getattr(_knowledge_base, 'docs_dir', 'knowledge_docs'))
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = docs_dir / safe_name
+
+    try:
+        uploaded_file.save(str(dest_path))
+        result = _knowledge_base.ingest_file(str(dest_path), force_reindex=True)
+        return jsonify(result)
+    except Exception as exc:
+        logging.error('Knowledge upload failed for %s: %s', safe_name, exc, exc_info=True)
+        return jsonify({'error': 'knowledge_upload_failed'}), 500
 
 
 def _anonymize_user_id(user_id: str, salt: str = '') -> str:
@@ -668,13 +836,21 @@ def export_conversations():
     if export_format not in ('csv', 'json'):
         return jsonify({'error': 'invalid_format', 'message': "format must be 'csv' or 'json'"}), 400
 
+    now = datetime.now()
+    end_date = request.args.get('end_date')
+    start_date = request.args.get('start_date')
     try:
-        end_date = request.args.get('end_date')
-        start_date = request.args.get('start_date')
-        end_dt = datetime.fromisoformat(end_date) if end_date else datetime.now()
-        start_dt = datetime.fromisoformat(start_date) if start_date else end_dt - timedelta(days=30)
+        end_dt = _coerce_requested_datetime(end_date, default=now, end_of_day=True)
+        start_dt = _coerce_requested_datetime(
+            start_date,
+            default=_lookback_window_start(30, now=end_dt),
+            end_of_day=False,
+        )
     except ValueError:
         return jsonify({'error': 'invalid_date', 'message': 'Dates must be ISO format (YYYY-MM-DD)'}), 400
+
+    if start_dt > end_dt:
+        return jsonify({'error': 'invalid_date_range', 'message': 'start_date must be before end_date'}), 400
 
     limit = request.args.get('limit', default=5000, type=int)
     limit = max(1, min(limit, 50000))
@@ -684,7 +860,7 @@ def export_conversations():
     try:
         query = '''
             SELECT c.user_id, c.user_message, c.bot_response,
-                   c.timestamp, c.token_count, c.is_important
+                   c.timestamp, c.token_count, c.important_flag
             FROM conversations c
             WHERE c.timestamp BETWEEN %s AND %s
             ORDER BY c.timestamp ASC
@@ -694,53 +870,67 @@ def export_conversations():
 
         records: List[Dict[str, Any]] = []
         for row in rows:
-            user_id_raw = row[0] if row[0] else ''
+            if isinstance(row, dict):
+                user_id_raw = row.get('user_id') or ''
+                user_message = row.get('user_message') or ''
+                bot_response = row.get('bot_response') or ''
+                timestamp_value = row.get('timestamp')
+                token_count = row.get('token_count') or 0
+                important_flag = row.get('important_flag')
+            else:
+                user_id_raw = row[0] if row[0] else ''
+                user_message = row[1] or ''
+                bot_response = row[2] or ''
+                timestamp_value = row[3]
+                token_count = row[4] or 0
+                important_flag = row[5]
+
             record = {
                 'participant_id': _anonymize_user_id(user_id_raw, salt) if anonymize else user_id_raw,
-                'user_message': row[1] or '',
-                'bot_response': row[2] or '',
-                'timestamp': row[3].isoformat() if hasattr(row[3], 'isoformat') else str(row[3]) if row[3] else '',
-                'token_count': int(row[4]) if row[4] else 0,
-                'is_important': bool(row[5]) if row[5] is not None else False,
+                'user_message': user_message,
+                'bot_response': bot_response,
+                'timestamp': timestamp_value.isoformat() if hasattr(timestamp_value, 'isoformat') else str(timestamp_value) if timestamp_value else '',
+                'token_count': int(token_count) if token_count else 0,
+                'is_important': bool(important_flag) if important_flag is not None else False,
             }
             records.append(record)
 
+        filename = f"jaidee_export_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.{export_format}"
         if export_format == 'csv':
             output = io.StringIO()
             if records:
                 writer = csv.DictWriter(output, fieldnames=records[0].keys())
                 writer.writeheader()
                 writer.writerows(records)
-            csv_data = output.getvalue()
-            filename = f"jaidee_export_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.csv"
+            csv_data = '\ufeff' + output.getvalue()
             return Response(
                 csv_data,
                 mimetype='text/csv',
                 headers={'Content-Disposition': f'attachment; filename="{filename}"'},
             )
-        else:
-            payload = {
-                'exported_at': datetime.now().isoformat(),
-                'parameters': {
-                    'start_date': start_dt.isoformat(),
-                    'end_date': end_dt.isoformat(),
-                    'limit': limit,
-                    'anonymized': anonymize,
-                    'format': export_format,
-                },
-                'total_records': len(records),
-                'data': records,
-            }
-            filename = f"jaidee_export_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.json"
-            return Response(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                mimetype='application/json',
-                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
-            )
+
+        payload = {
+            'exported_at': now.isoformat(),
+            'parameters': {
+                'start_date': start_dt.isoformat(),
+                'end_date': end_dt.isoformat(),
+                'limit': limit,
+                'anonymized': anonymize,
+                'format': export_format,
+            },
+            'total_records': len(records),
+            'data': records,
+        }
+        return Response(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            mimetype='application/json',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
 
     except Exception as exc:
         logging.error('Error exporting conversations: %s', exc, exc_info=True)
         return jsonify({
             'error': 'export_failed',
-            'message': 'ไม่สามารถส่งออกข้อมูลได้ในขณะนี้',
+            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸ªà¹ˆà¸‡à¸­à¸­à¸à¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¹„à¸”à¹‰à¹ƒà¸™à¸‚à¸“à¸°à¸™à¸µà¹‰',
         }), 500
+

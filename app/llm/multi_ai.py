@@ -33,16 +33,34 @@ _MULTI_AI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 # Evaluation prompt template
-EVALUATION_PROMPT = """ให้คะแนน 0-100 สำหรับทุกคำตอบต่อไปนี้ คุณต้องให้คะแนนครบทุกคำตอบ ห้ามข้าม
-เกณฑ์: ความถูกต้อง, ความเป็นธรรมชาติ, ความเห็นอกเห็นใจ, MI technique, ความกระชับ
+EVALUATION_PROMPT = """คุณคือผู้เชี่ยวชาญด้านการให้รหัส (Coder) ตามระบบ MITI 4.2.1 (Motivational Interviewing Treatment Integrity)
+หน้าที่ของคุณคือการวิเคราะห์และให้คะแนน 0-100 สำหรับทุก "คำตอบตัวเลือก" ต่อไปนี้ (จำลองว่าตัวเลือกคือ Clinician และผู้ใช้คือ Client)
+คุณต้องให้คะแนนครบทุกตัวเลือก ห้ามข้าม
+
+ขั้นตอนการประเมินในใจ (ประยุกต์จาก MITI 4.2.1 และ RAG):
+1. การนับพฤติกรรม (Behavior Counts):
+   - ให้คะแนนสูง (MI Adherent): Emphasizing Autonomy (เน้นสิทธิการตัดสินใจ), Seeking Collaboration (ขอความร่วมมือ), Affirm (ชื่นชมจุดแข็งอย่างลึกซึ้ง), Complex Reflection (สะท้อนความหมายที่ซ่อนอยู่)
+   - ให้คะแนนปานกลาง: Simple Reflection, Question (ควรถามปลายเปิด), Giving Information (ให้ข้อมูลเป็นกลาง)
+   - หักคะแนน (MI Non-Adherent): Confront (โต้แย้ง/ตำหนิ/วิจารณ์/สั่งสอน), Persuade (โน้มน้าว/แนะนำโดยไม่ขออนุญาต)
+2. คะแนนภาพรวม (Global Ratings):
+   - Cultivating Change Talk: พยายามกระตุ้นให้ผู้ใช้พูดถึงเป้าหมาย/การเปลี่ยนแปลง
+   - Softening Sustain Talk: เลี่ยงการไปปะทะหรือลดความสำคัญของข้ออ้างที่จะไม่เปลี่ยน
+   - Partnership: ร่วมมือ แชร์อำนาจ ไม่ทำตัวเหนือกว่า
+   - Empathy: เข้าใจมุมมองและความรู้สึกที่ไม่ได้พูดออกมาตรงๆ
+3. ความถูกต้องของบริบท (RAG Knowledge):
+   - หากมี "บริบทความรู้จากระบบ" แนบมา ต้องนำข้อมูลมาสังเคราะห์ใช้ (Giving Information แบบเหมาะสม) อย่างถูกต้อง เป็นธรรมชาติ และไม่ทิ้งหลักการ MI
+4. หักคะแนนหนัก — ห้ามระบุชื่อเทคนิคในข้อความ:
+   - คำตอบที่มี annotation ชื่อเทคนิคในวงเล็บหรือหน้าย่อหน้า เช่น "(สะท้อนความรู้สึก)" "(ใช้คำถามปลายเปิด)" "(เน้น Harm Reduction)" ให้หักคะแนนอย่างน้อย 30 คะแนน เพราะผิดหลักการสนทนาที่เป็นธรรมชาติ
 
 บทบาทของแชทบอท: \"\"\"{system_context}\"\"\"
 
-คำถามผู้ใช้: \"\"\"{user_message}\"\"\"
+คำถามผู้ใช้ (Client): \"\"\"{user_message}\"\"\"
 
+คำตอบตัวเลือก (Clinician Responses):
 {responses_section}
 
-ตอบเป็น JSON เท่านั้น ครบทุก key ห้ามมีข้อความอื่น:
+วิเคราะห์ตามเกณฑ์ข้างต้น แล้วรวมผลลัพธ์เป็นคะแนน 0-100 สำหรับแต่ละคำตอบ
+ตอบผลลัพธ์เป็น JSON เท่านั้น ครบทุก key ห้ามมีคำอธิบายหรือข้อความอื่น:
 {expected_json}"""
 
 
@@ -517,6 +535,29 @@ def select_best(
     return best_provider, responses[best_provider], avg_scores[best_provider]
 
 
+def _collect_system_context(messages: List[Dict[str, str]]) -> str:
+    system_parts: List[str] = []
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if content:
+            system_parts.append(content)
+    return "\n\n".join(system_parts)
+
+
+def _cooldown_before_evaluation(timeout: float, total_start: float) -> float:
+    if timeout <= 0:
+        return 1.5
+
+    elapsed_seconds = max(0.0, time.time() - total_start)
+    remaining_budget = max(0.0, timeout - elapsed_seconds)
+    if remaining_budget <= 1.0:
+        return 0.0
+
+    return min(1.5, max(0.0, remaining_budget * 0.1, 0.15))
+
+
 def multi_ai_chat(
     messages: List[Dict[str, str]],
     registry: Optional[ProviderRegistry] = None,
@@ -553,11 +594,7 @@ def multi_ai_chat(
         eval_timeout = EVALUATION_TIMEOUT
 
     # Extract system context and latest user message for evaluation prompt
-    system_context = ""
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_context = msg.get("content", "")
-            break
+    system_context = _collect_system_context(messages)
 
     user_message = ""
     for msg in reversed(messages):
@@ -619,8 +656,9 @@ def multi_ai_chat(
             provider_times=provider_times,
         )
 
-    # Cooldown between phases to avoid provider rate limits (e.g. Gemini 429)
-    time.sleep(1.5)
+    cooldown_seconds = _cooldown_before_evaluation(timeout, total_start)
+    if cooldown_seconds > 0:
+        time.sleep(cooldown_seconds)
 
     # Phase 2: Cross-Evaluation
     eval_start = time.time()

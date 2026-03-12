@@ -202,6 +202,17 @@ def assess_risk(message: str) -> RiskAssessmentResult:
     if negated_high:
         return RiskAssessmentResult("medium", negated_high)
 
+    # ลบคำซ้ำซ้อน (เช่น เจอ 'สารเสพติด' ไม่ต้องนับ 'เสพติด' อีก)
+    def _deduplicate_matches(matches: List[str]) -> List[str]:
+        # Sort by length descending, so longer words are kept
+        sorted_matches = sorted(matches, key=len, reverse=True)
+        deduped = []
+        for match in sorted_matches:
+            # Add to deduped if this match is not a substring of any already added longer match
+            if not any(match in added and match != added for added in deduped):
+                deduped.append(match)
+        return deduped
+
     # ตรวจหาคำความเสี่ยงปานกลาง
     medium_matches: List[str] = []
     for keyword in RISK_KEYWORDS["medium_risk"]:
@@ -209,6 +220,9 @@ def assess_risk(message: str) -> RiskAssessmentResult:
             pos = _find_keyword_pos(keyword, message)
             if not _is_negated(message, pos):
                 medium_matches.append(keyword)
+    
+    # หักลบคำที่ซ้อนกันเองก่อนเข้าเงื่อนไข (เช่น 'สารเสพติด' + 'เสพติด' -> เหลือแค่ 'สารเสพติด')
+    medium_matches = _deduplicate_matches(medium_matches)
     matched_keywords.extend(medium_matches)
 
     if len(medium_matches) >= MEDIUM_RISK_THRESHOLD:

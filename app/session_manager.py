@@ -232,52 +232,13 @@ def is_important_message(user_message: str, bot_response: str, risk_level: str =
 
 def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[str, str]]:
     """Manage conversation history to fit within the context window."""
+    current_history = get_chat_session(user_id)
+    if not current_history:
+        return []
     try:
-        current_history = get_chat_session(user_id)
-        if not current_history:
-            return []
-        current_tokens = get_session_token_count(user_id)
-        if current_tokens < token_threshold:
-            return current_history
-        logging.info(
-            f"เซสชันใกล้เต็ม context window ({current_tokens} tokens) สำหรับผู้ใช้ {user_id}, กำลังจัดการประวัติ..."
-        )
-        keep_recent = 30
-        if len(current_history) <= keep_recent * 2:
-            return current_history
-        recent_messages = current_history[-keep_recent*2:]
-        older_messages = current_history[:-keep_recent*2]
-        if older_messages:
-            important_pairs = []
-            normal_pairs = []
-            for i in range(0, len(older_messages), 2):
-                if i+1 < len(older_messages):
-                    user_msg = older_messages[i].get("content", "")
-                    bot_resp = older_messages[i+1].get("content", "")
-                    if is_important_message(user_msg, bot_resp):
-                        important_pairs.append((user_msg, bot_resp))
-                    else:
-                        normal_pairs.append((user_msg, bot_resp))
-            important_messages = []
-            for user_msg, bot_resp in important_pairs:
-                important_messages.append({"role": "user", "content": user_msg})
-                important_messages.append({"role": "assistant", "content": bot_resp})
-            formatted_normal = []
-            for i, (user_msg, bot_resp) in enumerate(normal_pairs):
-                formatted_normal.append((i, user_msg, bot_resp))
-            summary = ""
-            if formatted_normal:
-                from .services.context_manager import summarize_conversation_history as _summarize
-                summary = _summarize(formatted_normal, _config)
-            new_history = []
-            if summary:
-                # ใช้ role พิเศษสำหรับการสรุปที่ไม่แสดงให้ผู้ใช้เห็น
-                new_history.append({"role": "system_summary", "content": f"สรุปการสนทนาก่อนหน้า: {summary}"})
-            new_history.extend(important_messages)
-            new_history.extend(recent_messages)
-            save_chat_session(user_id, new_history)
-            return new_history
-        return current_history
+        from .services.context_manager import optimize_context
+
+        return optimize_context(user_id, _config, None, max_tokens=token_threshold)
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการจัดการประวัติ: {str(e)}")
         return current_history
@@ -286,7 +247,7 @@ def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[s
 def generate_contextual_followup_message(user_id: str, db, config):
     """สร้างข้อความติดตามที่เป็นไปตามบริบทของการสนทนาล่าสุดโดยใช้ xAI Grok"""
     from .utils import safe_api_call, clean_ai_response
-    from .llm import grok_client
+    from .llm.ai_caller import call_ai
     
     try:
         # ดึงประวัติการสนทนาล่าสุด โดยใช้ max_tokens แทน limit
@@ -332,8 +293,8 @@ def generate_contextual_followup_message(user_id: str, db, config):
 โปรดสร้างข้อความติดตามที่แสดงให้เห็นว่าคุณจำและเข้าใจบริบทของการสนทนาก่อนหน้า:
 """
 
-        # เรียกใช้ xAI Grok API ด้วยการตั้งค่าที่เหมาะสม
-        text = grok_client.send_chat(
+        # เรียกใช้ AI API (รองรับ multi-AI consensus)
+        text = call_ai(
             messages=[
                 {"role": "system", "content": "คุณคือแชทบอท 'ใจดี' ที่ช่วยเหลือคนเลิกสารเสพติดด้วยความเข้าใจและเป็นมิตร คุณสามารถจำและอ้างอิงถึงการสนทนาก่อนหน้าได้"},
                 {"role": "user", "content": followup_prompt}
