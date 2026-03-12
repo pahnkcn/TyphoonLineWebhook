@@ -2098,20 +2098,7 @@ def handle_command_with_processing(user_id, command, reply_token=None):
 
     response_text = None
 
-    if normalized == '/reset':
-        db.clear_user_history(user_id)
-        redis_client.delete(f"chat_session:{user_id}")
-        redis_client.delete(f"session_tokens:{user_id}")
-        redis_client.zrem('follow_up_queue', user_id)
-        redis_client.delete(f"last_follow_up:{user_id}")
-        redis_client.delete(f"first_interaction:{user_id}")
-        response_text = (
-            "🔄 ล้างประวัติการสนทนาเรียบร้อยแล้วครับ\n\n"
-            "เราสามารถเริ่มต้นการสนทนาใหม่ได้ทันที\n"
-            "คุณต้องการพูดคุยเกี่ยวกับเรื่องอะไรดีครับ?"
-        )
-
-    elif normalized == '/optimize':
+    if normalized == '/optimize':
         token_count_before = get_session_token_count(user_id)
         hybrid_context_management(user_id, TOKEN_THRESHOLD)
         token_count_after = get_session_token_count(user_id)

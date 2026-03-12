@@ -109,16 +109,8 @@ def delete_all_user_data(user_id: str) -> Dict[str, Any]:
         logging.error(f"Failed to delete user_metrics for {user_id}: {e}")
         result['errors'].append(f"user_metrics: {e}")
 
-    # 4. Clear registration data (anonymize, keep code for referential integrity)
-    try:
-        _db_manager.execute_and_commit(
-            "UPDATE registration_codes SET user_id = NULL, form_data = NULL WHERE user_id = %s",
-            (user_id,),
-        )
-        result['registration_cleared'] = True
-    except Exception as e:
-        logging.error(f"Failed to clear registration for {user_id}: {e}")
-        result['errors'].append(f"registration: {e}")
+    # 4. Keep registration data intact so user can re-verify without re-filling the form
+    result['registration_cleared'] = False
 
     # 5. Delete Redis keys
     redis_keys_to_delete = [
@@ -200,7 +192,6 @@ def format_deletion_result(result: Dict[str, Any]) -> str:
     msg += f"• ประวัติการสนทนา: {result['conversations_deleted']} รายการ\n"
     msg += f"• การติดตามผล: {result['follow_ups_deleted']} รายการ\n"
     msg += f"• ข้อมูลเมตริก: {result['metrics_deleted']} รายการ\n"
-    msg += f"• ข้อมูลลงทะเบียน: {'ล้างแล้ว' if result['registration_cleared'] else 'ไม่พบ'}\n"
     msg += f"• ข้อมูลเซสชัน: {result['redis_keys_deleted']} คีย์\n\n"
 
     if result['errors']:
