@@ -199,8 +199,6 @@ def format_deletion_result(result: Dict[str, Any]) -> str:
     else:
         msg += "✅ ลบข้อมูลทั้งหมดเรียบร้อยแล้ว\n\n"
 
-    msg += "คุณยังสามารถใช้งานน้องใจดีต่อได้ หากต้องการลงทะเบียนใหม่ พิมพ์ /register"
-
     return msg
 
 

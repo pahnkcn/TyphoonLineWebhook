@@ -512,3 +512,49 @@ class ChatHistoryDB:
             })
         return trend
 
+    @safe_db_operation
+    def get_user_history_count(self, user_id: str) -> int:
+        """Return the total number of conversation entries for a user."""
+        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            return int(row.get('COUNT(*)', 0) if isinstance(row, dict) else row[0] or 0)
+        return 0
+
+    @safe_db_operation
+    def get_important_message_count(self, user_id: str) -> int:
+        """Return the number of important-flagged messages for a user."""
+        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s AND important_flag = TRUE'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            return int(row.get('COUNT(*)', 0) if isinstance(row, dict) else row[0] or 0)
+        return 0
+
+    @safe_db_operation
+    def get_last_interaction(self, user_id: str) -> Optional[str]:
+        """Return the timestamp of the user's most recent conversation."""
+        query = 'SELECT MAX(timestamp) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            val = row.get('MAX(timestamp)') if isinstance(row, dict) else row[0]
+            if val is None:
+                return 'ยังไม่มีการสนทนา'
+            if isinstance(val, datetime):
+                return val.strftime('%Y-%m-%d %H:%M')
+            return str(val)
+        return 'ยังไม่มีการสนทนา'
+
+    @safe_db_operation
+    def get_total_tokens(self, user_id: str) -> int:
+        """Return the sum of token_count for all conversations of a user."""
+        query = 'SELECT COALESCE(SUM(token_count), 0) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            if isinstance(row, dict):
+                return int(next(iter(row.values()), 0) or 0)
+            return int(row[0] or 0)
+        return 0
