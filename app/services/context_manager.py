@@ -13,7 +13,7 @@ from ..config import (
     SUMMARY_GENERATION_CONFIG,
     TOKEN_THRESHOLD,
 )
-from ..llm import grok_client
+from ..llm.ai_caller import call_ai
 from ..risk_assessment import assess_risk
 from ..session_manager import (
     get_chat_session,
@@ -69,7 +69,7 @@ def summarize_conversation_chunk(chunk: List[Tuple], config: Any) -> str:
 **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที**
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
@@ -130,7 +130,7 @@ def summarize_conversation_history(history: List[Tuple], config: Any) -> str:
 ให้สรุปแบบครอบคลุมประเด็นสำคัญทั้งหมด:
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": summary_prompt}
@@ -176,7 +176,7 @@ def summarize_by_topic(history: List[Tuple], config: Any) -> str:
 แต่ละหัวข้อควรครอบคลุมประเด็นสำคัญที่พูดถึงโดยมีใจความชัดเจน กระชับ และเก็บรายละเอียดสำคัญไว้
 """
 
-        text = grok_client.send_chat(
+        text = call_ai(
             messages=[
                 SYSTEM_MESSAGE_SUMMARY,
                 {"role": "user", "content": topic_prompt}

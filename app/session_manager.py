@@ -247,7 +247,7 @@ def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[s
 def generate_contextual_followup_message(user_id: str, db, config):
     """สร้างข้อความติดตามที่เป็นไปตามบริบทของการสนทนาล่าสุดโดยใช้ xAI Grok"""
     from .utils import safe_api_call, clean_ai_response
-    from .llm import grok_client
+    from .llm.ai_caller import call_ai
     
     try:
         # ดึงประวัติการสนทนาล่าสุด โดยใช้ max_tokens แทน limit
@@ -293,8 +293,8 @@ def generate_contextual_followup_message(user_id: str, db, config):
 โปรดสร้างข้อความติดตามที่แสดงให้เห็นว่าคุณจำและเข้าใจบริบทของการสนทนาก่อนหน้า:
 """
 
-        # เรียกใช้ xAI Grok API ด้วยการตั้งค่าที่เหมาะสม
-        text = grok_client.send_chat(
+        # เรียกใช้ AI API (รองรับ multi-AI consensus)
+        text = call_ai(
             messages=[
                 {"role": "system", "content": "คุณคือแชทบอท 'ใจดี' ที่ช่วยเหลือคนเลิกสารเสพติดด้วยความเข้าใจและเป็นมิตร คุณสามารถจำและอ้างอิงถึงการสนทนาก่อนหน้าได้"},
                 {"role": "user", "content": followup_prompt}

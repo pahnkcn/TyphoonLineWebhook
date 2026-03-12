@@ -54,6 +54,7 @@ from .config import (
 )
 from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
 from .llm import grok_client
+from .llm.ai_caller import call_ai
 from .llm.multi_ai import multi_ai_chat
 from .llm.providers import get_registry as get_multi_ai_registry
 from .chat_history_db import ChatHistoryDB
@@ -987,8 +988,8 @@ def summarize_form_data(form_data):
 - **ไม่ต้องมีคำนำหรือคำอธิบายวิธีการสรุป เริ่มต้นเนื้อหาสรุปเลยทันที** - **สำคัญมาก**
 """
 
-        # เรียก xAI Grok API
-        summary = grok_client.send_chat(
+        # เรียก AI API (รองรับ multi-AI consensus)
+        summary = call_ai(
             messages=[
                 {
                     "role": "system",
