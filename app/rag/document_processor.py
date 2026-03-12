@@ -612,13 +612,13 @@ def _merge_short_document_chunks(
     return merged
 
 
-def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 1100, overlap: int = 120) -> List[str]:
     if not text or not text.strip():
         return []
 
     cleaned = text.strip()
     if chunk_size <= 0:
-        chunk_size = 1500
+        chunk_size = 1100
     if overlap < 0:
         overlap = 0
 
@@ -631,8 +631,8 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[st
 
 def chunk_document(
     file_path: str,
-    chunk_size: int = 500,
-    overlap: int = 100,
+    chunk_size: int = 1100,
+    overlap: int = 120,
 ) -> List[DocumentChunk]:
     path = Path(file_path)
     segments = load_document_segments(path)

@@ -240,12 +240,12 @@ class KnowledgeBase:
         db_manager,
         redis_client=None,
         docs_dir: str = "knowledge_docs",
-        chunk_size: int = 1500,
-        overlap: int = 200,
+        chunk_size: int = 1100,
+        overlap: int = 120,
         embedding_dim: int = 1536,
-        min_score: float = 0.35,
-        base_fetch_k: int = 24,
-        max_context_chars: int = 7000,
+        min_score: float = 0.42,
+        base_fetch_k: int = 36,
+        max_context_chars: int = 5200,
         max_chunk_chars: int = 1800,
     ):
         self.db_manager = db_manager
@@ -711,12 +711,12 @@ def init_knowledge_base(
     docs_dir: str = "knowledge_docs",
     enabled: bool = True,
     auto_ingest: bool = True,
-    chunk_size: int = 1500,
-    overlap: int = 200,
-    min_score: float = 0.35,
+    chunk_size: int = 1100,
+    overlap: int = 120,
+    min_score: float = 0.42,
     embedding_dim: int = 1536,
-    base_fetch_k: int = 24,
-    max_context_chars: int = 7000,
+    base_fetch_k: int = 36,
+    max_context_chars: int = 5200,
 ) -> Optional[KnowledgeBase]:
     global _KNOWLEDGE_BASE_INSTANCE
 
