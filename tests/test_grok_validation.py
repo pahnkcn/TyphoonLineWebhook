@@ -42,7 +42,7 @@ class TestSendChatValidation:
             mock_instance.chat.completions.create.return_value = mock_response
             mock_client.return_value = mock_instance
 
-            with pytest.raises(GrokAPIError, match="empty choices"):
+            with pytest.raises(GrokAPIError, match="missing choices"):
                 send_chat([{"role": "user", "content": "test"}])
 
     def test_missing_choices_raises_error(self):
@@ -191,6 +191,9 @@ class TestStreamChatValidation:
             mock_instance = Mock()
 
             # Simulate connection error after first chunk
+            import httpx
+            from openai import APIConnectionError as _APIConnError
+
             def stream_generator():
                 # First chunk succeeds
                 chunk1 = Mock()
@@ -201,15 +204,17 @@ class TestStreamChatValidation:
                 chunk1.choices = [choice1]
                 yield chunk1
 
-                # Then connection error
-                from openai import APIConnectionError
-                raise APIConnectionError("Connection lost")
+                # Then connection error (requires request kwarg)
+                raise _APIConnError(
+                    message="Connection lost",
+                    request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions"),
+                )
 
             mock_instance.chat.completions.create.return_value = stream_generator()
             mock_client.return_value = mock_instance
 
             result = []
-            with pytest.raises(APIConnectionError):
+            with pytest.raises(_APIConnError):
                 for chunk in stream_chat([{"role": "user", "content": "test"}]):
                     result.append(chunk)
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 โมดูลฐานข้อมูลประวัติการแชทสำหรับแชทบอท 'ใจดี'
 """
 from datetime import datetime, timedelta
@@ -7,6 +7,17 @@ from typing import List, Tuple, Dict, Any, Optional, Union
 from .utils import safe_db_operation
 from .token_counter import TokenCounter
 from .database_manager import DatabaseManager
+
+def _resolve_window_cutoff(days: Optional[int] = None, cutoff: Optional[datetime] = None) -> Optional[datetime]:
+    """Return an inclusive start-of-day cutoff for dashboard lookback windows."""
+    if cutoff is not None:
+        return cutoff
+    if days is None:
+        return None
+
+    days = max(1, min(int(days or 0), 180))
+    window_start = (datetime.now() - timedelta(days=days - 1)).date()
+    return datetime.combine(window_start, datetime.min.time())
 
 class ChatHistoryDB:
     """
@@ -24,6 +35,37 @@ class ChatHistoryDB:
         self.db = db_manager
         self.counter = TokenCounter(cache_size=5000)  # เพิ่มขนาดแคชเพื่อประสิทธิภาพ
         logging.info("ChatHistoryDB initialized with enhanced database manager")
+
+    @safe_db_operation
+    def save_conversation(self, user_id: str, user_message: str, bot_response: str,
+                          token_count: int = 0, important: bool = False) -> int:
+        """
+        บันทึกการสนทนาลงฐานข้อมูล
+
+        Args:
+            user_id: LINE User ID
+            user_message: ข้อความของผู้ใช้
+            bot_response: ข้อความตอบกลับของบอท
+            token_count: จำนวนโทเค็นที่ใช้
+            important: ข้อความสำคัญหรือไม่
+
+        Returns:
+            int: ID ของแถวที่เพิ่มใหม่
+        """
+        query = '''
+            INSERT INTO conversations (user_id, timestamp, user_message, bot_response, token_count, important_flag)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        '''
+        try:
+            row_id = self.db.execute_and_get_last_id(
+                query,
+                (user_id, datetime.now(), user_message, bot_response, token_count, important)
+            )
+            logging.debug(f"Saved conversation for user {user_id}, id={row_id}")
+            return row_id
+        except Exception as e:
+            logging.error(f"Error saving conversation: {str(e)}")
+            raise
 
     @safe_db_operation
     def get_user_history(self, user_id: str, max_tokens: int = 100000) -> List[Tuple]:
@@ -72,12 +114,17 @@ class ChatHistoryDB:
             logging.error(f"Error retrieving user history: {str(e)}")
             # คืนค่ารายการว่างในกรณีที่มีข้อผิดพลาด
             return []
-
-
     @safe_db_operation
-    def get_user_conversation_feed(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_user_conversation_feed(
+        self,
+        user_id: str,
+        limit: int = 50,
+        cutoff: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         '''Return most recent conversation entries for dashboard views.'''
         limit = max(1, min(int(limit or 0), 200))
+        cutoff = _resolve_window_cutoff(cutoff=cutoff)
+
         query = '''
             SELECT
                 id,
@@ -88,16 +135,20 @@ class ChatHistoryDB:
                 COALESCE(token_count, 0) AS token_count
             FROM conversations
             WHERE user_id = %s
-            ORDER BY timestamp DESC
-            LIMIT %s
         '''
+        params: List[Any] = [user_id]
+        if cutoff is not None:
+            query += '\n            AND timestamp >= %s'
+            params.append(cutoff)
+        query += '\n            ORDER BY timestamp DESC\n            LIMIT %s'
+        params.append(limit)
 
         try:
-            rows = self.db.execute_query(query, (user_id, limit))
+            rows = self.db.execute_query(query, tuple(params))
         except TypeError:
             rows = self.db.execute_query(
                 query.replace('LIMIT %s', f'LIMIT {limit}'),
-                (user_id,)
+                tuple(params[:-1])
             )
 
         history: List[Dict[str, Any]] = []
@@ -131,8 +182,13 @@ class ChatHistoryDB:
         return history
 
     @safe_db_operation
-    def get_user_snapshot(self, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_snapshot(
+        self,
+        user_id: str,
+        cutoff: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
         '''Collect aggregate metrics for a single user.'''
+        cutoff = _resolve_window_cutoff(cutoff=cutoff)
         query = '''
             SELECT
                 user_id,
@@ -143,14 +199,17 @@ class ChatHistoryDB:
                 COALESCE(SUM(token_count), 0) AS total_tokens
             FROM conversations
             WHERE user_id = %s
-            GROUP BY user_id
-            LIMIT 1
         '''
+        params: List[Any] = [user_id]
+        if cutoff is not None:
+            query += '\n            AND timestamp >= %s'
+            params.append(cutoff)
+        query += '\n            GROUP BY user_id\n            LIMIT 1'
 
         try:
-            rows = self.db.execute_query(query, (user_id,), dictionary=True)
+            rows = self.db.execute_query(query, tuple(params), dictionary=True)
         except TypeError:
-            rows = self.db.execute_query(query.replace('LIMIT 1', 'LIMIT 1'), (user_id,))
+            rows = self.db.execute_query(query, tuple(params))
 
         if not rows:
             return None
@@ -196,10 +255,13 @@ class ChatHistoryDB:
         return snapshot
 
     @safe_db_operation
-    def get_recent_daily_message_totals(self, days: int = 14) -> List[Dict[str, Any]]:
+    def get_recent_daily_message_totals(
+        self,
+        days: int = 14,
+        cutoff: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         '''Aggregate conversation counts per day within a rolling window.'''
-        days = max(1, min(int(days or 0), 90))
-        cutoff = datetime.now() - timedelta(days=days - 1)
+        cutoff = _resolve_window_cutoff(days=days, cutoff=cutoff)
 
         query = '''
             SELECT
@@ -240,281 +302,31 @@ class ChatHistoryDB:
         return totals
 
     @safe_db_operation
-    def save_conversation(self, user_id: str, user_message: str, bot_response: str,
-                         token_count: int = 0, important: bool = None) -> bool:
-        """
-        บันทึกการสนทนาเดี่ยวลงในฐานข้อมูลด้วยประสิทธิภาพที่ดีขึ้น
-
-        Args:
-            user_id: LINE User ID
-            user_message: ข้อความของผู้ใช้
-            bot_response: การตอบกลับของบอท
-            token_count: จำนวนโทเค็นที่ใช้
-            important: ความสำคัญของข้อความ (None = ตรวจสอบอัตโนมัติ)
-
-        Returns:
-            bool: True หากสำเร็จ
-        """
-        try:
-            # ตรวจสอบความสำคัญถ้าไม่มีการระบุ
-            if important is None:
-                important = self._check_message_importance(user_message, bot_response)
-
-            # ถ้าไม่มีการระบุจำนวนโทเค็น ให้คำนวณ
-            if not token_count:
-                token_count = self.counter.count_tokens(user_message + bot_response)
-
-            # ใช้ query ที่มีประสิทธิภาพ
-            query = '''
-                INSERT INTO conversations
-                (user_id, timestamp, user_message, bot_response, token_count, important_flag)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            '''
-
-            params = (
-                user_id,
-                datetime.now(),
-                user_message,
-                bot_response,
-                token_count,
-                important
-            )
-
-            # ใช้ DatabaseManager เพื่อดำเนินการ query
-            self.db.execute_and_commit(query, params)
-            return True
-
-        except Exception as e:
-            logging.error(f"Error saving conversation: {str(e)}")
-            raise
-
-    @safe_db_operation
-    def save_batch_conversations(self, conversations: List[Dict[str, Any]]) -> bool:
-        """
-        บันทึกหลายการสนทนาพร้อมกันเพื่อประสิทธิภาพที่ดีขึ้น
-
-        Args:
-            conversations: รายการข้อมูลการสนทนา
-
-        Returns:
-            bool: True หากสำเร็จ
-        """
-        if not conversations:
-            return True
-
-        try:
-            # Prepare batch values with optimized processing
-            values = []
-            for conv in conversations:
-                # ตรวจสอบความสำคัญถ้าไม่มีการระบุ
-                important = conv.get('important')
-                if important is None:
-                    important = self._check_message_importance(
-                        conv['user_message'], conv['bot_response']
-                    )
-
-                # ถ้าไม่มีการระบุจำนวนโทเค็น ให้คำนวณ
-                token_count = conv.get('token_count', 0)
-                if not token_count:
-                    token_count = self.counter.count_tokens(
-                        conv['user_message'] + conv['bot_response']
-                    )
-
-                values.append((
-                    conv['user_id'],
-                    conv.get('timestamp', datetime.now()),
-                    conv['user_message'],
-                    conv['bot_response'],
-                    token_count,
-                    important
-                ))
-
-            # ใช้ query ที่มีประสิทธิภาพ
-            query = '''
-                INSERT INTO conversations
-                (user_id, timestamp, user_message, bot_response, token_count, important_flag)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            '''
-
-            # ใช้ DatabaseManager เพื่อดำเนินการ batch insert
-            self.db.execute_many(query, values)
-            return True
-
-        except Exception as e:
-            logging.error(f"Error saving batch conversations: {str(e)}")
-            raise
-
-    def _check_message_importance(self, user_message, bot_response):
-        """
-        ตรวจสอบความสำคัญของข้อความตามเนื้อหา
-
-        Args:
-            user_message (str): ข้อความของผู้ใช้
-            bot_response (str): คำตอบของบอท
-
-        Returns:
-            bool: True หากข้อความสำคัญ
-        """
-        # ตรวจสอบคำสำคัญในข้อความของผู้ใช้
-        important_keywords = [
-            'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย',
-            'overdose', 'เกินขนาด', 'ก้าวร้าว',
-            'ซึมเศร้า', 'วิตกกังวล', 'ความทรงจำ',
-            'ไม่มีความสุข', 'ทรมาน', 'เครียด',
-            'เลิก', 'หยุด', 'อดทน'
-        ]
-
-        combined_text = (user_message + " " + bot_response).lower()
-        for keyword in important_keywords:
-            if keyword.lower() in combined_text:
-                return True
-
-        # ตรวจสอบความยาวของข้อความ (ข้อความที่ยาวมักมีเนื้อหาสำคัญ)
-        if len(user_message) > 300 or len(bot_response) > 500:
-            return True
-
-        return False
-
-    @safe_db_operation
-    def get_user_history_count(self, user_id: str) -> int:
-        """
-        นับจำนวนการสนทนาของผู้ใช้
-
-        Args:
-            user_id: LINE User ID
-
-        Returns:
-            int: จำนวนบันทึกการสนทนา
-        """
-        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s'
-        result = self.db.execute_query(query, (user_id,))
-        return result[0][0] if result else 0
-
-    @safe_db_operation
-    def get_important_message_count(self, user_id: str) -> int:
-        """
-        นับจำนวนข้อความสำคัญของผู้ใช้
-
-        Args:
-            user_id: LINE User ID
-
-        Returns:
-            int: จำนวนข้อความสำคัญ
-        """
-        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s AND important_flag = TRUE'
-        result = self.db.execute_query(query, (user_id,))
-        return result[0][0] if result else 0
-
-    @safe_db_operation
-    def get_last_interaction(self, user_id: str) -> str:
-        """
-        ดึงเวลาของการสนทนาล่าสุด
-
-        Args:
-            user_id: LINE User ID
-
-        Returns:
-            str: เวลาในรูปแบบ string หรือ "ไม่มีข้อมูล"
-        """
-        query = 'SELECT MAX(timestamp) FROM conversations WHERE user_id = %s'
-        result = self.db.execute_query(query, (user_id,))
-
-        timestamp = result[0][0] if result and result[0] else None
-        if timestamp:
-            return timestamp.strftime('%Y-%m-%d %H:%M:%S')
-        return "ไม่มีข้อมูล"
-
-    @safe_db_operation
-    def get_total_tokens(self, user_id: str) -> int:
-        """
-        คำนวณจำนวนโทเค็นทั้งหมดที่ใช้งานโดยผู้ใช้
-
-        Args:
-            user_id: LINE User ID
-
-        Returns:
-            int: จำนวนโทเค็นทั้งหมด
-        """
-        query = 'SELECT SUM(token_count) FROM conversations WHERE user_id = %s'
-        result = self.db.execute_query(query, (user_id,))
-        return result[0][0] or 0 if result and result[0] else 0
-
-    @safe_db_operation
-    def clear_user_history(self, user_id: str) -> bool:
-        """
-        ลบประวัติการสนทนาทั้งหมดของผู้ใช้
-
-        Args:
-            user_id: LINE User ID
-
-        Returns:
-            bool: True หากสำเร็จ
-        """
-        try:
-            query = 'DELETE FROM conversations WHERE user_id = %s'
-            self.db.execute_and_commit(query, (user_id,))
-            return True
-        except Exception as e:
-            logging.error(f"Error clearing user history: {str(e)}")
-            raise
-
-    @safe_db_operation
-    def update_follow_up_status(self, user_id: str, status: str, timestamp: datetime = None) -> bool:
-        """
-        อัพเดทสถานะการติดตามผลสำหรับผู้ใช้
-
-        Args:
-            user_id: LINE User ID
-            status: สถานะการติดตาม ('scheduled', 'sent', 'completed')
-            timestamp: เวลาที่อัพเดท (ถ้าไม่ระบุจะใช้เวลาปัจจุบัน)
-
-        Returns:
-            bool: True หากสำเร็จ
-        """
-        try:
-            if timestamp is None:
-                timestamp = datetime.now()
-
-            # ตรวจสอบว่ามีรายการติดตามอยู่แล้วหรือไม่
-            query = 'SELECT id FROM follow_ups WHERE user_id = %s AND status != %s'
-            result = self.db.execute_query(query, (user_id, 'completed'))
-
-            if result and result[0]:
-                # อัพเดทรายการที่มีอยู่
-                update_query = 'UPDATE follow_ups SET status = %s, updated_at = %s WHERE id = %s'
-                self.db.execute_and_commit(update_query, (status, timestamp, result[0][0]))
-            else:
-                # สร้างรายการใหม่
-                insert_query = '''
-                    INSERT INTO follow_ups
-                    (user_id, status, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s)
-                '''
-                self.db.execute_and_commit(insert_query, (user_id, status, timestamp, timestamp))
-
-            return True
-
-        except Exception as e:
-            logging.error(f"Error updating follow-up status: {str(e)}")
-            raise
-
-    @safe_db_operation
-    def get_dashboard_overview(self) -> Dict[str, int]:
+    def get_dashboard_overview(self, cutoff: Optional[datetime] = None) -> Dict[str, int]:
         """Collect global conversation metrics for the practitioner dashboard."""
-        query = (
-            """
+        cutoff = _resolve_window_cutoff(cutoff=cutoff)
+        query = """
             SELECT
                 COUNT(*) AS total_conversations,
                 COUNT(DISTINCT user_id) AS unique_users,
                 COALESCE(SUM(CASE WHEN important_flag THEN 1 ELSE 0 END), 0) AS important_messages
             FROM conversations
-            """
-        )
+        """
+        params: List[Any] = []
+        if cutoff is not None:
+            query += "\n            WHERE timestamp >= %s"
+            params.append(cutoff)
 
         try:
-            result = self.db.execute_query(query, dictionary=True)
+            if params:
+                result = self.db.execute_query(query, tuple(params), dictionary=True)
+            else:
+                result = self.db.execute_query(query, dictionary=True)
         except TypeError:
-            result = self.db.execute_query(query)
+            if params:
+                result = self.db.execute_query(query, tuple(params))
+            else:
+                result = self.db.execute_query(query)
             if result:
                 total_conversations, unique_users, important_messages = result[0]
             else:
@@ -533,10 +345,14 @@ class ChatHistoryDB:
         }
 
     @safe_db_operation
-    def get_recent_user_summaries(self, limit: int = 20) -> List[Dict[str, Any]]:
+    def get_recent_user_summaries(
+        self,
+        limit: Optional[int] = 20,
+        cutoff: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         """Return per-user conversation snapshots ordered by recency."""
-        query = (
-            """
+        cutoff = _resolve_window_cutoff(cutoff=cutoff)
+        query = """
             SELECT
                 user_id,
                 COUNT(*) AS total_messages,
@@ -544,16 +360,33 @@ class ChatHistoryDB:
                 MAX(timestamp) AS last_interaction,
                 COALESCE(SUM(token_count), 0) AS total_tokens
             FROM conversations
-            GROUP BY user_id
-            ORDER BY last_interaction DESC
-            LIMIT %s
-            """
-        )
+        """
+        params: List[Any] = []
+        if cutoff is not None:
+            query += "\n            WHERE timestamp >= %s"
+            params.append(cutoff)
+        query += "\n            GROUP BY user_id\n            ORDER BY last_interaction DESC"
+        limited = limit is not None
+        if limited:
+            limit = max(1, min(int(limit or 0), 500))
+            query += "\n            LIMIT %s"
+            params.append(limit)
 
         try:
-            rows = self.db.execute_query(query, (limit,), dictionary=True)
+            if params:
+                rows = self.db.execute_query(query, tuple(params), dictionary=True)
+            else:
+                rows = self.db.execute_query(query, dictionary=True)
         except TypeError:
-            rows = self.db.execute_query(query.replace('%s', str(limit)))
+            fallback_query = query
+            fallback_params = tuple(params)
+            if limited:
+                fallback_query = query.replace('LIMIT %s', f'LIMIT {limit}')
+                fallback_params = tuple(params[:-1])
+            if fallback_params:
+                rows = self.db.execute_query(fallback_query, fallback_params)
+            else:
+                rows = self.db.execute_query(fallback_query)
 
         summaries: List[Dict[str, Any]] = []
         for row in rows or []:
@@ -578,3 +411,150 @@ class ChatHistoryDB:
             })
 
         return summaries
+
+    @safe_db_operation
+    def get_retention_buckets(self, cutoff: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Return user distribution by total session (message-pair) count buckets."""
+        cutoff = _resolve_window_cutoff(cutoff=cutoff)
+        query = '''
+            SELECT
+                CASE
+                    WHEN msg_count = 1 THEN '1'
+                    WHEN msg_count BETWEEN 2 AND 5 THEN '2-5'
+                    WHEN msg_count BETWEEN 6 AND 15 THEN '6-15'
+                    WHEN msg_count BETWEEN 16 AND 30 THEN '16-30'
+                    ELSE '31+'
+                END AS bucket,
+                COUNT(*) AS user_count
+            FROM (
+                SELECT user_id, COUNT(*) AS msg_count
+                FROM conversations
+        '''
+        params: List[Any] = []
+        if cutoff is not None:
+            query += '\n                WHERE timestamp >= %s'
+            params.append(cutoff)
+        query += '''
+                GROUP BY user_id
+            ) AS per_user
+            GROUP BY bucket
+            ORDER BY FIELD(bucket, '1', '2-5', '6-15', '16-30', '31+')
+        '''
+
+        if params:
+            rows = self.db.execute_query(query, tuple(params))
+        else:
+            rows = self.db.execute_query(query)
+
+        buckets: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                buckets.append({
+                    'bucket': row.get('bucket', ''),
+                    'user_count': int(row.get('user_count') or 0),
+                })
+            else:
+                buckets.append({
+                    'bucket': row[0],
+                    'user_count': int(row[1] or 0),
+                })
+        return buckets
+
+    @safe_db_operation
+    def get_conversation_depth_trend(
+        self,
+        days: int = 30,
+        cutoff: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return daily averages of messages-per-user and tokens-per-message."""
+        cutoff = _resolve_window_cutoff(days=days, cutoff=cutoff)
+
+        query = '''
+            SELECT
+                DATE(timestamp) AS day_value,
+                COUNT(DISTINCT user_id) AS active_users,
+                COUNT(*) AS total_messages,
+                COALESCE(SUM(token_count), 0) AS total_tokens
+            FROM conversations
+            WHERE timestamp >= %s
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+        '''
+
+        rows = self.db.execute_query(query, (cutoff,))
+        trend: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                day_value = row.get('day_value') or row.get('date')
+                active_users = int(row.get('active_users') or 0)
+                total_messages = int(row.get('total_messages') or 0)
+                total_tokens = int(row.get('total_tokens') or 0)
+            else:
+                day_value, active_users, total_messages, total_tokens = row
+                active_users = int(active_users or 0)
+                total_messages = int(total_messages or 0)
+                total_tokens = int(total_tokens or 0)
+
+            if isinstance(day_value, datetime):
+                day_str = day_value.date().isoformat()
+            else:
+                day_str = str(day_value) if day_value is not None else None
+
+            avg_msgs = round(total_messages / active_users, 1) if active_users else 0
+            avg_tokens = round(total_tokens / total_messages, 1) if total_messages else 0
+
+            trend.append({
+                'date': day_str,
+                'active_users': active_users,
+                'total_messages': total_messages,
+                'avg_messages_per_user': avg_msgs,
+                'avg_tokens_per_message': avg_tokens,
+            })
+        return trend
+
+    @safe_db_operation
+    def get_user_history_count(self, user_id: str) -> int:
+        """Return the total number of conversation entries for a user."""
+        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            return int(row.get('COUNT(*)', 0) if isinstance(row, dict) else row[0] or 0)
+        return 0
+
+    @safe_db_operation
+    def get_important_message_count(self, user_id: str) -> int:
+        """Return the number of important-flagged messages for a user."""
+        query = 'SELECT COUNT(*) FROM conversations WHERE user_id = %s AND important_flag = TRUE'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            return int(row.get('COUNT(*)', 0) if isinstance(row, dict) else row[0] or 0)
+        return 0
+
+    @safe_db_operation
+    def get_last_interaction(self, user_id: str) -> Optional[str]:
+        """Return the timestamp of the user's most recent conversation."""
+        query = 'SELECT MAX(timestamp) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            val = row.get('MAX(timestamp)') if isinstance(row, dict) else row[0]
+            if val is None:
+                return 'ยังไม่มีการสนทนา'
+            if isinstance(val, datetime):
+                return val.strftime('%Y-%m-%d %H:%M')
+            return str(val)
+        return 'ยังไม่มีการสนทนา'
+
+    @safe_db_operation
+    def get_total_tokens(self, user_id: str) -> int:
+        """Return the sum of token_count for all conversations of a user."""
+        query = 'SELECT COALESCE(SUM(token_count), 0) FROM conversations WHERE user_id = %s'
+        rows = self.db.execute_query(query, (user_id,))
+        if rows:
+            row = rows[0]
+            if isinstance(row, dict):
+                return int(next(iter(row.values()), 0) or 0)
+            return int(row[0] or 0)
+        return 0

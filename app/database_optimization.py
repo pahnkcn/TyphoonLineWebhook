@@ -4,6 +4,7 @@ Implements performance improvements based on codebase analysis
 """
 import logging
 import time
+import re
 from mysql.connector import Error as MySQLError
 from typing import Dict, Any, List, Tuple
 from .database_manager import DatabaseManager
@@ -115,6 +116,22 @@ class DatabaseOptimizer:
                     logging.info(f"Index {index_info['index_name']} already exists on {index_info['table']}")
                     success_count += 1
                     continue
+
+                # Check if an equivalent index exists with a different name
+                existing_equivalent = self._find_equivalent_index(
+                    index_info['table'],
+                    index_info['columns']
+                )
+                if existing_equivalent:
+                    logging.info(
+                        "Equivalent index %s already exists on %s%s, skipping %s",
+                        existing_equivalent,
+                        index_info['table'],
+                        index_info['columns'],
+                        index_info['index_name']
+                    )
+                    success_count += 1
+                    continue
                 
                 # Create the index
                 logging.info(f"Creating index {index_info['index_name']} on {index_info['table']}{index_info['columns']}")
@@ -166,6 +183,68 @@ class DatabaseOptimizer:
         except Exception as e:
             logging.warning(f"Could not check if index {index_name} exists: {str(e)}")
             return False
+
+    def _find_equivalent_index(self, table_name: str, columns: str) -> str:
+        """
+        Find an existing index on the same table with identical ordered columns.
+
+        Args:
+            table_name: Name of the table
+            columns: Column list string such as "(user_id, timestamp)"
+
+        Returns:
+            str: Existing index name if found, else empty string
+        """
+        target_columns = self._parse_index_columns(columns)
+        if not target_columns:
+            return ''
+
+        try:
+            query = """
+                SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
+                FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = %s
+                ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """
+            result = self.db.execute_query(query, (table_name,))
+
+            index_columns: Dict[str, List[str]] = {}
+            for row in result:
+                index_name, _seq, column_name = row
+                if not index_name or not column_name or index_name == 'PRIMARY':
+                    continue
+                index_columns.setdefault(index_name, []).append(str(column_name).strip().lower())
+
+            for index_name, existing_columns in index_columns.items():
+                if tuple(existing_columns) == target_columns:
+                    return index_name
+
+        except Exception as e:
+            logging.warning(f"Could not check equivalent indexes for {table_name}: {str(e)}")
+
+        return ''
+
+    def _parse_index_columns(self, columns: str) -> Tuple[str, ...]:
+        """Normalize an index column list string into a tuple of lower-case column names."""
+        if not columns:
+            return tuple()
+
+        cleaned = columns.strip().strip('()')
+        if not cleaned:
+            return tuple()
+
+        parts = [part.strip().lower() for part in cleaned.split(',')]
+        normalized: List[str] = []
+
+        for part in parts:
+            # Keep only the bare column identifier from entries like
+            # "`timestamp` DESC" or "timestamp(10)".
+            identifier = re.match(r'`?([a-zA-Z0-9_]+)`?', part)
+            if identifier:
+                normalized.append(identifier.group(1))
+
+        return tuple(normalized)
 
     def _is_duplicate_index_error(self, error: Exception) -> bool:
         """Determine if the given error indicates an index already exists"""
