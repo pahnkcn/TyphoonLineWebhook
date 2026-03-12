@@ -670,6 +670,33 @@ class TestVectorStore:
         assert embedding_param
         assert all(ch in "0123456789abcdef" for ch in embedding_param)
 
+    def test_reload_truncates_mismatched_float32_embeddings_instead_of_reinterpreting_float64(self):
+        db = _InMemoryDBManager()
+        writer_store = VectorStore(db_manager=db, embedding_dim=4)
+        writer_store.add_chunks(
+            [
+                DocumentChunk("alpha", {"doc_id": "d1", "doc_name": "alpha.md", "chunk_index": 0}),
+                DocumentChunk("beta", {"doc_id": "d2", "doc_name": "beta.md", "chunk_index": 0}),
+            ],
+            [
+                [0.8, 0.2, 0.6, 0.4],
+                [0.2, 0.8, 0.4, 0.6],
+            ],
+        )
+
+        reloaded = VectorStore(db_manager=db, embedding_dim=2)
+
+        first_vec = reloaded._matrix[0].tolist()
+        second_vec = reloaded._matrix[1].tolist()
+        assert abs(first_vec[0] - 0.8) < 1e-6
+        assert abs(first_vec[1] - 0.2) < 1e-6
+        assert abs(second_vec[0] - 0.2) < 1e-6
+        assert abs(second_vec[1] - 0.8) < 1e-6
+
+        results = reloaded.search([1.0, 0.0], top_k=2)
+        assert results
+        assert results[0].doc_id == "d1"
+
 
 class TestKnowledgeBase:
     def test_ingest_directory_query_and_reindex(self, tmp_path: Path, monkeypatch):

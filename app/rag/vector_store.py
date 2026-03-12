@@ -70,11 +70,9 @@ class VectorStore:
         if vec.size == self.embedding_dim:
             return vec
 
-        if len(blob) % 8 == 0:
-            vec64 = np.frombuffer(blob, dtype=np.float64)
-            if vec64.size > 0:
-                return self._coerce_embedding(vec64.tolist())
-
+        # Embeddings are serialized as float32, so size mismatches should be
+        # handled by truncating or padding the decoded float32 values instead of
+        # reinterpreting the raw bytes as float64.
         return self._coerce_embedding(vec.tolist())
 
     def _tokenize_for_lexical(self, text: str) -> List[str]:
