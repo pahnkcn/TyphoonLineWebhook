@@ -31,11 +31,19 @@ def _get_client_identifier():
         if forwarded_for:
             forwarded_ip = forwarded_for.split(',', 1)[0].strip()
             if forwarded_ip:
-                return forwarded_ip
+                try:
+                    ipaddress.ip_address(forwarded_ip)
+                    return forwarded_ip
+                except ValueError:
+                    pass
 
         real_ip = request.headers.get('X-Real-IP', '').strip()
         if real_ip:
-            return real_ip
+            try:
+                ipaddress.ip_address(real_ip)
+                return real_ip
+            except ValueError:
+                pass
 
     return get_remote_address()
 
