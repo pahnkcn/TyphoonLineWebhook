@@ -2446,40 +2446,6 @@ def check_line_api_health():
     except Exception:
         return False
 
-_grok_health_cache: Dict[str, Any] = {'healthy': None, 'checked_at': 0.0}
-_GROK_HEALTH_CACHE_TTL = 300  # 5 นาที
-_grok_health_lock = threading.Lock()
-
-def check_grok_api_health():
-    """ตรวจสอบการเชื่อมต่อ xAI Grok API (cached เพื่อลดค่าใช้จ่ายโทเค็น)"""
-    now = time.time()
-
-    # ถ้า circuit breaker เปิดอยู่ → ไม่ต้องตรวจสอบจริง
-    if _xai_circuit_breaker.state.value == 'open':
-        return False
-
-    # ใช้ค่า cache ถ้ายังไม่หมดอายุ (check under lock to prevent thundering herd)
-    with _grok_health_lock:
-        if _grok_health_cache['healthy'] is not None and (now - _grok_health_cache['checked_at']) < _GROK_HEALTH_CACHE_TTL:
-            return _grok_health_cache['healthy']
-
-    try:
-        _ = grok_client.send_chat(
-            messages=[{"role": "user", "content": "ping"}],
-            model=config.XAI_MODEL,
-            max_tokens=1,
-        )
-        with _grok_health_lock:
-            _grok_health_cache['healthy'] = True
-            _grok_health_cache['checked_at'] = now
-        return True
-    except Exception as e:
-        logging.debug(f"xAI Grok API health check failed: {str(e)}")
-        with _grok_health_lock:
-            _grok_health_cache['healthy'] = False
-            _grok_health_cache['checked_at'] = now
-        return False
-
 def get_uptime():
     """ดึงเวลาการทำงานของแอปพลิเคชัน"""
     try:
