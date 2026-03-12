@@ -55,8 +55,6 @@ from .config import (
 from .utils import safe_db_operation, safe_api_call, clean_ai_response, check_hospital_inquiry, get_hospital_information_message, handle_grok_api_error
 from .llm import grok_client
 from .llm.ai_caller import call_ai
-from .llm.multi_ai import multi_ai_chat
-from .llm.providers import get_registry as get_multi_ai_registry
 from .chat_history_db import ChatHistoryDB
 from .token_counter import TokenCounter
 from .session_manager import (
@@ -1559,43 +1557,22 @@ def generate_ai_response_with_timeout(
 
     effective_timeout = _calculate_adaptive_timeout(api_messages, base_timeout=timeout)
 
-    # --- Multi-AI Consensus Mode ---
-    if getattr(config, 'MULTI_AI_ENABLED', False):
-        try:
-            registry = get_multi_ai_registry()
-            if registry.count >= 2:
-                logging.info(f"[multi-ai] Using consensus mode with {registry.count} providers for user {user_id}")
-                consensus = multi_ai_chat(
-                    messages=api_messages,
-                    registry=registry,
-                    temperature=dynamic_config.get("temperature", 0.7),
-                    max_tokens=dynamic_config.get("max_tokens", 1024),
-                    timeout=effective_timeout,
-                )
-                logging.info(
-                    f"[multi-ai] Result: best={consensus.best_provider} "
-                    f"score={consensus.avg_score:.1f} "
-                    f"time={consensus.total_time_ms:.0f}ms "
-                    f"providers={consensus.providers_used}"
-                )
-                # Fire-and-forget: persist consensus result for dashboard
-                try:
-                    _save_multi_ai_log(user_id, consensus)
-                except Exception as log_err:
-                    logging.warning(f"[multi-ai] Failed to save log: {log_err}")
-                return consensus.best_response
-        except RuntimeError as e:
-            logging.warning(f"[multi-ai] All providers failed, falling back to Grok: {e}")
-        except Exception as e:
-            logging.error(f"[multi-ai] Unexpected error, falling back to Grok: {e}")
+    # --- Unified AI call (multi-AI consensus or single-provider via call_ai) ---
 
-    # --- Single-provider mode (Grok) ---
+    def _on_consensus(consensus):
+        try:
+            _save_multi_ai_log(user_id, consensus)
+        except Exception as log_err:
+            logging.warning(f"[multi-ai] Failed to save log: {log_err}")
 
     def _call() -> str:
-        return _xai_circuit_breaker.call(
-            grok_client.send_chat,
+        return call_ai(
             messages=api_messages,
             model=config.XAI_MODEL,
+            timeout=effective_timeout,
+            circuit_breaker=_xai_circuit_breaker,
+            on_consensus=_on_consensus,
+            _config=config,
             **dynamic_config,
         )
 
