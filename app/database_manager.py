@@ -3,7 +3,6 @@
 จัดการการเชื่อมต่อฐานข้อมูลและการดำเนินการที่เกี่ยวข้อง
 """
 import logging
-import os
 import time
 import mysql.connector
 from mysql.connector import pooling
@@ -80,11 +79,6 @@ class DatabaseManager:
             retry_interval: Time between retries in seconds
         """
         import socket
-
-        environment = os.getenv('ENVIRONMENT', '').lower()
-        if environment in {'test', 'testing'}:
-            logging.info("Skipping database wait in testing environment")
-            return
         
         start_time = time.time()
         host = self.config['host']

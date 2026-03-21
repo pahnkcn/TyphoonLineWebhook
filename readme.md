@@ -2,306 +2,204 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-TyphoonLineWebhook powers `ใจดี`, a Thai-language LINE chatbot for supportive substance-use counseling. The current project combines LINE webhook handling, xAI Grok responses, optional Multi-AI consensus, Redis-backed session and progress tracking, MySQL persistence, a research dashboard, and a local knowledge base for retrieval-augmented responses.
+TyphoonLineWebhook is a LINE-based chatbot designed to provide support and guidance for individuals dealing with substance abuse issues. The chatbot now uses xAI's Grok-4 model to deliver empathetic, non-judgmental responses in Thai language.
 
-## 🌟 Current Features
+## 🌟 Features
 
-- **LINE chatbot for Thai users**: Accepts LINE webhook events and replies with supportive, non-judgmental guidance.
-- **Risk assessment and crisis handling**: Detects risk keywords, classifies risk level, and surfaces emergency resources.
-- **Registration and verification flow**: Supports `/register`, `/verify <code>`, and a form webhook for importing verification codes plus form context.
-- **Session and progress tracking**: Stores chat history in MySQL and session/progress state in Redis.
-- **Follow-ups and proactive check-ins**: APScheduler runs follow-up jobs and inactivity-based check-ins in the background.
-- **Optional Multi-AI consensus**: Can compare responses from multiple providers and return the best-scored answer.
-- **RAG knowledge base**: Loads documents from `knowledge_docs/` and supports upload/reindex APIs for `.pdf`, `.docx`, `.txt`, and `.md` files.
-- **Research dashboard**: Includes `/dashboard` plus analytics, user history, Multi-AI stats, knowledge stats, and anonymized export APIs.
-- **Privacy and data deletion tools**: Includes `/privacy`, `/context`, `/deletedata`, and session reset support.
-- **Operational safeguards**: Rate limiting, health checks, rotating logs, Redis resilience, and optional dashboard API authentication.
-
-## 🧱 Architecture Overview
-
-```
-LINE Messaging API
-        │
-        ▼
-Flask app (`app/app_main.py`)
-        ├── Webhook validation and command handling
-        ├── Risk assessment and crisis workflows
-        ├── xAI Grok chat or optional Multi-AI consensus
-        ├── MySQL conversation storage
-        ├── Redis session / progress / follow-up state
-        ├── RAG knowledge base (`knowledge_docs/`)
-        └── Dashboard + export APIs (`app/routes/dashboard.py`)
-```
-
-## 📁 Project Structure
-
-```
-TyphoonLineWebhook/
-├── app/
-│   ├── app_main.py                # Main Flask app and LINE webhook handling
-│   ├── config.py                  # Environment loading and prompt/config settings
-│   ├── chat_history_db.py         # Conversation/history data access
-│   ├── database_*.py              # DB init, monitoring, optimization helpers
-│   ├── risk_assessment.py         # Risk detection and progress reporting
-│   ├── session_manager.py         # Session/context lifecycle
-│   ├── llm/                       # Grok client, provider registry, Multi-AI consensus
-│   ├── rag/                       # Knowledge base, chunking, embeddings, vector store
-│   ├── routes/dashboard.py        # Dashboard and analytics APIs
-│   ├── services/                  # Admin alerting, data management, proactive check-ins, Redis client
-│   └── monitoring/                # Token usage tracking
-├── knowledge_docs/                # Source documents for RAG ingestion
-├── migrations/                    # Alembic migrations
-├── templates/dashboard.html       # Research dashboard UI
-├── tests/                         # Pytest suite
-├── scripts/install.bat            # Windows local setup helper
-├── scripts/install.sh             # Ubuntu server bootstrap script
-├── docker-compose.yml             # Local/dev Docker stack
-├── docker-compose.override.yml    # Dev-only Adminer service
-├── docker-compose.prod.yml        # Production-style Docker stack
-├── Dockerfile                     # Container image build
-└── wsgi.py                        # Recommended app entry point
-```
+- **Conversational Support**: Engages users in supportive dialogue about substance use concerns
+- **Risk Assessment**: Automatically detects high-risk keywords and provides emergency resources
+- **Follow-up System**: Scheduled follow-ups to check on user progress (1, 3, 7, 14, and 30-day intervals)
+- **Progress Tracking**: Monitors user interactions and risk levels over time
+- **Session Management**: Maintains conversation context with timeout notifications
+- **Multi-component Architecture**: Uses Redis for caching, MySQL for persistent storage, and LINE for messaging
 
 ## 📋 Requirements
 
-- **Python**: 3.11+
-- **MySQL**: 8.0+
-- **Redis**: 6+
-- **LINE Messaging API** credentials
-- **xAI API key** for Grok
-- **Optional AI provider keys** for Multi-AI and embedding workflows
+- Python 3.9+ (3.11 recommended)
+- MySQL 8.0+
+- Redis 6+
+- LINE Messaging API credentials
+- xAI API key (XAI_API_KEY)
 
-## 🚀 Getting Started
+## 🚀 Installation
 
-### Option 1: Windows local setup
+### Option 1: Docker Installation (Recommended)
 
-Run the helper script:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/TyphoonLineWebhook.git
+   cd TyphoonLineWebhook
+   ```
 
-```powershell
-.\scripts\install.bat
+2. Create a `.env` file from the template:
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Edit the `.env` file with your credentials:
+   ```
+   LINE_CHANNEL_ACCESS_TOKEN=your_line_token
+   LINE_CHANNEL_SECRET=your_line_secret
+   XAI_API_KEY=your_xai_api_key
+   ```
+
+4. Build and start the containers:
+   ```bash
+   docker-compose up -d
+   ```
+
+### Option 2: Manual Installation
+
+#### Windows
+
+1. Run the installation script:
+   ```
+   install.bat
+   ```
+
+2. Follow the prompts to configure the application.
+
+#### Linux/Ubuntu
+
+1. Run the installation script with sudo:
+   ```bash
+   sudo bash install.sh
+   ```
+
+2. The script will set up all dependencies and configure the environment.
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API access token | - |
+| `LINE_CHANNEL_SECRET` | LINE channel secret | - |
+| `XAI_API_KEY` | xAI API key | - |
+| `REDIS_HOST` | Redis host | localhost |
+| `REDIS_PORT` | Redis port | 6379 |
+| `MYSQL_HOST` | MySQL host | localhost |
+| `MYSQL_USER` | MySQL username | root |
+| `MYSQL_PASSWORD` | MySQL password | - |
+| `MYSQL_DB` | MySQL database name | chatbot |
+| `LOG_LEVEL` | Logging level | INFO |
+
+### LINE Webhook Configuration
+
+1. Create a LINE Bot account at [LINE Developers Console](https://developers.line.biz/)
+2. Configure the webhook URL to point to your server:
+   ```
+   https://your-server-domain/callback
+   ```
+3. Enable webhook and disable auto-reply features
+
+## 🏗️ Architecture
+
+The application follows a modular architecture with these key components:
+
+```
+                  ┌─────────────┐
+                  │  LINE API   │
+                  └─────┬───────┘
+                        │
+                        ▼
+┌────────────┐    ┌─────────────┐    ┌─────────────┐
+│  xAI Grok  │◄───┤ App Server  ├───►│    Redis    │
+└────────────┘    └─────┬───────┘    └─────────────┘
+                        │
+                        ▼
+                  ┌─────────────┐
+                  │    MySQL    │
+                  └─────────────┘
 ```
 
-The script creates a virtual environment, installs dependencies, creates `.env` from `.env.example` when needed, and offers shortcuts to run the app, Docker Compose, or tests.
+### Key Components
 
-### Option 2: Manual local setup
+- **app_main.py**: Main application handling LINE webhook events
+- **async_api.py**: Backward-compatible async shim that forwards to xAI Grok
+- **chat_history_db.py**: Database operations for conversation history
+- **token_counter.py**: Token counting for API usage monitoring
+- **middleware/rate_limiter.py**: Rate limiting implementation
 
-1. Copy `.env.example` to `.env`.
-2. Fill in the required secrets.
-3. Make sure MySQL and Redis are running.
-4. Install dependencies and start the app.
+## 🖥️ Development
 
-Windows PowerShell:
+### Project Structure
 
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-python wsgi.py
+```
+TyphoonLineWebhook/
+│
+├── app/                          # Application code
+│   ├── __init__.py               # Package initialization
+│   ├── app_main.py           # Main application
+│   ├── async_api.py              # Asynchronous API client
+│   ├── chat_history_db.py        # Database operations
+│   ├── config.py                 # Configuration
+│   ├── database_init.py          # Database initialization
+│   ├── token_counter.py          # Token counting
+│   ├── utils.py                  # Utilities
+│   └── middleware/               # Middleware components
+│       ├── __init__.py           # Package initialization
+│       └── rate_limiter.py       # Rate limiting middleware
+│
+├── docker-compose.yml            # Docker compose configuration
+├── Dockerfile                    # Docker configuration
+├── logs/                         # Log directory
+├── scripts/                      # Installation scripts
+│   ├── install.bat               # Windows installation script
+│   └── install.sh                # Linux installation script
+├── wsgi.py                       # WSGI entry point
+├── requirements.txt              # Python dependencies
+├── .gitignore                    # Git ignore patterns
+└── readme.md                     # This documentation
 ```
 
-Bash:
+### Version Control
+
+The project includes a comprehensive `.gitignore` file that excludes:
+- Python bytecode and cache files
+- Virtual environment directories
+- Log files
+- Local configuration and environment files
+- IDE-specific files
+- Database files
+
+### Running Tests
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-python wsgi.py
+pytest tests/
 ```
 
-The app starts on port `5000` by default.
+### Logging
 
-### Option 3: Docker development
+Logs are stored in the `logs/` directory and rotated automatically when they reach 5&nbsp;MB. Verbosity is configurable through the `LOG_LEVEL` environment variable.
 
-```bash
-docker compose up -d --build
+## 📱 Usage
+
+### User Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Display help information |
+| `/status` | Show usage statistics |
+| `/emergency` | Display emergency contacts |
+| `/progress` | View progress report |
+| `/followup` | Show next follow-up date and remaining schedule |
+
+### Monitoring
+
+Access the health check endpoint to monitor system status:
 ```
-
-Local Docker services:
-
-- **App**: `http://localhost:5000`
-- **Health check**: `http://localhost:5000/health`
-- **Adminer**: `http://localhost:8080` (from `docker-compose.override.yml`)
-- **Redis**: `localhost:6379`
-- **MySQL**: `localhost:3306`
-
-### Option 4: Production-style Docker
-
-```bash
-docker compose -f docker-compose.prod.yml up -d
+GET /health
 ```
-
-Notes:
-
-- `docker-compose.prod.yml` expects a published image unless you override `DOCKER_IMAGE`.
-- The production stack mounts `logs/` and `knowledge_docs/` into the container.
-- Set `ENVIRONMENT=production` and replace all placeholder secrets.
-
-### Option 5: Ubuntu server bootstrap
-
-```bash
-sudo bash scripts/install.sh
-```
-
-This script installs Docker, Nginx, Certbot tooling, prepares the app directory, and creates `.env` from `.env.example` when needed.
-
-## ⚙️ Environment Configuration
-
-The full configuration surface lives in `.env.example`. The most important variables are below.
-
-### Required to start the app
-
-- `LINE_CHANNEL_ACCESS_TOKEN`
-- `LINE_CHANNEL_SECRET`
-- `XAI_API_KEY`
-- `MYSQL_HOST`
-- `MYSQL_USER`
-- `MYSQL_PASSWORD`
-- `MYSQL_DB`
-
-### Common runtime settings
-
-| Variable | Purpose |
-|----------|---------|
-| `REDIS_HOST` | Redis hostname |
-| `REDIS_PORT` | Redis port |
-| `REDIS_DB` | Redis database index |
-| `MYSQL_PORT` | MySQL port |
-| `ENVIRONMENT` | `development` or `production` |
-| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
-| `PORT` | App port for `wsgi.py` |
-| `XAI_MODEL` | xAI model override |
-
-### Feature and security settings
-
-| Variable | Purpose |
-|----------|---------|
-| `DASHBOARD_API_KEY` | Optional bearer token for dashboard APIs |
-| `FORM_WEBHOOK_KEY` | Required secret for `/api/add-verification-code` |
-| `ADMIN_ALERT_ENABLED` | Enables admin alerting workflows |
-| `LINE_NOTIFY_TOKEN` | LINE Notify token for admin alerts |
-| `MULTI_AI_ENABLED` | Enables Multi-AI consensus mode |
-| `MULTI_AI_TIMEOUT` | Total Multi-AI time budget |
-| `RAG_ENABLED` | Enables retrieval-augmented generation |
-| `RAG_MIN_SCORE` | Minimum retrieval score threshold |
-| `RAG_CHUNK_SIZE` | Chunk size for RAG ingestion |
-| `RAG_CHUNK_OVERLAP` | Overlap between RAG chunks |
-| `RAG_FETCH_K` | Number of candidate chunks to fetch |
-| `RAG_MAX_CONTEXT_CHARS` | Maximum injected RAG context length |
-| `ENABLE_SKIP_VERIFY` | Enables `/skipverify` for testing only |
-
-### Optional AI provider settings
-
-Multi-AI and embedding-related options can be enabled with the keys already listed in `.env.example`, including:
-
-- `OPENAI_API_KEY`, `OPENAI_MODEL`
-- `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`
-- `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`
-- `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`
-- `MOONSHOT_API_KEY`, `MOONSHOT_MODEL`
-- `OPENROUTER_API_KEY`, `OPENROUTER_MODELS`, `OPENROUTER_EMBEDDING_MODEL`
-
-## 🔌 Webhook and API Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/callback` | LINE Messaging API webhook endpoint |
-| `GET` | `/health` | Health check for app, DB, Redis, and xAI config status |
-| `POST` | `/api/add-verification-code` | Accepts form webhook submissions with `FORM_WEBHOOK_KEY` |
-| `GET` | `/dashboard` | Research dashboard page |
-| `GET` | `/api/dashboard/insights` | High-level analytics and risk insights |
-| `GET` | `/api/dashboard/users/<user_id>/history` | Detailed user history drill-down |
-| `GET` | `/api/dashboard/multi-ai-stats` | Multi-AI usage and scoring stats |
-| `GET` | `/api/dashboard/export` | Export anonymized conversation data as JSON or CSV |
-| `GET` | `/api/knowledge/stats` | Knowledge base stats |
-| `POST` | `/api/knowledge/reindex` | Rebuild the knowledge index |
-| `POST` | `/api/knowledge/upload` | Upload knowledge files (`.pdf`, `.docx`, `.txt`, `.md`) |
-
-Dashboard API authentication:
-
-- If `DASHBOARD_API_KEY` is empty, dashboard APIs are open.
-- If it is set, send `Authorization: Bearer <your-key>`.
-- Query-string `api_key` also works, but the code warns against using it.
-
-Form webhook authentication:
-
-- `/api/add-verification-code` expects a JSON body containing `api_key`, `code`, and `full_form_data`.
-- `api_key` must match `FORM_WEBHOOK_KEY`.
-- `code` must be a 6-digit numeric verification code.
-
-## 💬 LINE Commands
-
-These commands are currently handled in `app/app_main.py`.
-
-| Command | Purpose |
-|---------|---------|
-| `/help` | Show the help menu |
-| `/register` | Show the registration instructions |
-| `/verify <code>` | Verify a 6-digit registration code |
-| `/status` | Show conversation and token usage summary |
-| `/progress` | Show progress report and next-step guidance |
-| `/context` | Show context imported from the registration form |
-| `/followup` | Show follow-up status |
-| `/tokens` | Show current session token usage |
-| `/privacy` | Show the privacy policy |
-| `/deletedata` | Delete the user's stored data |
-| `/emergency` | Show urgent care and hotline information |
-| `/skipverify` | Dev/test-only bypass when `ENABLE_SKIP_VERIFY=true` |
-
-## 🧠 RAG Knowledge Base
-
-- Source documents live in `knowledge_docs/`.
-- Supported document formats are `.pdf`, `.docx`, `.txt`, and `.md`.
-- The app can auto-ingest documents on startup when RAG is enabled.
-- Dashboard APIs support live stats, reindexing, and document upload.
-- RAG configuration is controlled through the `RAG_*` environment variables.
-
-## ⏱️ Background Jobs
-
-The scheduler is initialized by `wsgi.py` / `app_main.py` and currently runs:
-
-- **Follow-up processing** every 30 minutes
-- **Proactive inactivity check-ins** every 6 hours
-
-## 🧪 Testing
-
-Run the test suite with:
-
-```bash
-pytest tests/ -v --tb=short
-```
-
-The repository includes tests for configuration validation, risk assessment, RAG behavior, Multi-AI workflows, Redis resilience, token counting, and admin alerting.
-
-## 📝 Logging and Operations
-
-- Logs are written to `logs/`.
-- Rotating log handlers cap log files at 5 MB with backups.
-- The app uses Waitress for direct serving and exposes `application = app` in `wsgi.py` for WSGI servers.
-- Local Docker health checks call `GET /health`.
-
-## 📡 LINE Webhook Setup
-
-1. Create a bot in the [LINE Developers Console](https://developers.line.biz/).
-2. Set the webhook URL to:
-
-    ```
-    https://your-domain/callback
-    ```
-
-3. Enable webhook delivery.
-4. Disable conflicting auto-reply features in LINE if you want the bot to handle replies itself.
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## 🙏 Acknowledgements
 
 - [LINE Messaging API](https://developers.line.biz/en/docs/messaging-api/)
-- [xAI](https://x.ai)
-- [Flask](https://flask.palletsprojects.com/)
-- [Waitress](https://docs.pylonsproject.org/projects/waitress/en/stable/)
-- [Redis](https://redis.io/)
-- [MySQL](https://www.mysql.com/)
+- [xAI](https://x.ai) for Grok-4
+
+- [Flask](https://flask.palletsprojects.com/) web framework

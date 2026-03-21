@@ -1,15 +1,13 @@
-﻿"""
+"""
 โมดูลการกำหนดค่าสำหรับแชทบอท 'ใจดี'
 จัดการตัวแปรสภาพแวดล้อมและการตั้งค่าต่างๆ
 """
 import os
 import sys
 import logging
-import re
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from typing import Optional
-from .risk_assessment import assess_risk
 
 # โหลดตัวแปรสภาพแวดล้อม
 load_dotenv()
@@ -42,21 +40,7 @@ class Config:
     PORT: int
     
     # ตัวแปรที่มีค่าเริ่มต้นต้องมาหลังตัวแปรที่ไม่มีค่าเริ่มต้น
-    XAI_MODEL: str = field(default="grok-4-1-fast-non-reasoning")
-    
-    # Multi-AI Consensus
-    MULTI_AI_ENABLED: bool = field(default=False)
-    MULTI_AI_TIMEOUT: int = field(default=45)
-
-    # Retrieval-Augmented Generation (RAG)
-    RAG_ENABLED: bool = field(default=True)
-    RAG_MIN_SCORE: float = field(default=0.42)
-    RAG_CHUNK_SIZE: int = field(default=1100)
-    RAG_CHUNK_OVERLAP: int = field(default=120)
-    RAG_EMBEDDING_DIM: int = field(default=1536)
-    RAG_TOP_K: int = field(default=4)
-    RAG_FETCH_K: int = field(default=36)
-    RAG_MAX_CONTEXT_CHARS: int = field(default=5200)
+    XAI_MODEL: str = field(default="grok-4-1-fast-reasoning")
 
 def load_config():
     """
@@ -95,17 +79,7 @@ def load_config():
         'ENVIRONMENT': 'development',
         'LOG_LEVEL': 'INFO',
         'PORT': '5000',
-        'XAI_MODEL': 'grok-4-1-fast-non-reasoning',
-        'MULTI_AI_ENABLED': 'false',
-        'MULTI_AI_TIMEOUT': '45',
-        'RAG_ENABLED': 'true',
-        'RAG_MIN_SCORE': '0.42',
-        'RAG_CHUNK_SIZE': '1100',
-        'RAG_CHUNK_OVERLAP': '120',
-        'RAG_EMBEDDING_DIM': '1536',
-        'RAG_TOP_K': '4',
-        'RAG_FETCH_K': '36',
-        'RAG_MAX_CONTEXT_CHARS': '5200',
+        'XAI_MODEL': 'grok-4-1-fast-reasoning'
     }
     
     for var, default in defaults.items():
@@ -114,18 +88,7 @@ def load_config():
             print(f"ใช้ค่าเริ่มต้นสำหรับ {var}: {default}")
     
     # ตรวจสอบค่าตัวเลข
-    numeric_vars = [
-        'REDIS_PORT',
-        'REDIS_DB',
-        'MYSQL_PORT',
-        'PORT',
-        'RAG_CHUNK_SIZE',
-        'RAG_CHUNK_OVERLAP',
-        'RAG_EMBEDDING_DIM',
-        'RAG_TOP_K',
-        'RAG_FETCH_K',
-        'RAG_MAX_CONTEXT_CHARS',
-    ]
+    numeric_vars = ['REDIS_PORT', 'REDIS_DB', 'MYSQL_PORT', 'PORT']
     for var in numeric_vars:
         try:
             int(os.getenv(var))
@@ -133,30 +96,6 @@ def load_config():
             print(f"ข้อผิดพลาด: {var} ต้องเป็นตัวเลข")
             sys.exit(1)
     
-    # เธ•เธฃเธงเธเธชเธญเธ LOG_LEVEL เธ—เธตเนเธ–เธนเธเธ•เนเธญเธ
-    valid_log_levels = {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'}
-    log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-    if log_level not in valid_log_levels:
-        print(f"คำเตือน: LOG_LEVEL '{log_level}' ไม่ถูกต้อง ใช้ค่าเริ่มต้น INFO (ค่าที่รองรับ: {', '.join(sorted(valid_log_levels))})")
-        os.environ['LOG_LEVEL'] = 'INFO'
-
-    # ตรวจสอบค่า placeholder ในโหมด production
-    environment = os.getenv('ENVIRONMENT', 'development')
-    if environment == 'production':
-        placeholder_patterns = ['your_', 'change_this', 'example', 'placeholder', 'xxx']
-        sensitive_vars = {
-            'LINE_CHANNEL_ACCESS_TOKEN': os.getenv('LINE_CHANNEL_ACCESS_TOKEN', ''),
-            'LINE_CHANNEL_SECRET': os.getenv('LINE_CHANNEL_SECRET', ''),
-            'XAI_API_KEY': os.getenv('XAI_API_KEY', ''),
-            'MYSQL_PASSWORD': os.getenv('MYSQL_PASSWORD', ''),
-            'DASHBOARD_API_KEY': os.getenv('DASHBOARD_API_KEY', ''),
-            'FORM_WEBHOOK_KEY': os.getenv('FORM_WEBHOOK_KEY', ''),
-        }
-        for var_name, var_value in sensitive_vars.items():
-            if any(p in var_value.lower() for p in placeholder_patterns):
-                logging.critical(f"SECURITY: {var_name} ดูเหมือนค่า placeholder ในโหมด production! กรุณาตั้งค่าที่ถูกต้อง")
-                sys.exit(1)
-
     # สร้างออบเจ็กต์การตั้งค่า
     config = Config(
         LINE_CHANNEL_ACCESS_TOKEN=os.getenv('LINE_CHANNEL_ACCESS_TOKEN'),
@@ -170,29 +109,12 @@ def load_config():
         MYSQL_USER=os.getenv('MYSQL_USER'),
         MYSQL_PASSWORD=os.getenv('MYSQL_PASSWORD'),
         MYSQL_DB=os.getenv('MYSQL_DB'),
-        ENVIRONMENT=environment,
+        ENVIRONMENT=os.getenv('ENVIRONMENT'),
         LOG_LEVEL=os.getenv('LOG_LEVEL'),
         PORT=int(os.getenv('PORT')),
-        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-non-reasoning'),
-        MULTI_AI_ENABLED=os.getenv('MULTI_AI_ENABLED', 'false').lower() in ('true', '1', 'yes'),
-        MULTI_AI_TIMEOUT=int(os.getenv('MULTI_AI_TIMEOUT', '45')),
-        RAG_ENABLED=os.getenv('RAG_ENABLED', 'true').lower() in ('true', '1', 'yes'),
-        RAG_MIN_SCORE=float(os.getenv('RAG_MIN_SCORE', '0.42')),
-        RAG_CHUNK_SIZE=int(os.getenv('RAG_CHUNK_SIZE', '1100')),
-        RAG_CHUNK_OVERLAP=int(os.getenv('RAG_CHUNK_OVERLAP', '120')),
-        RAG_EMBEDDING_DIM=int(os.getenv('RAG_EMBEDDING_DIM', '1536')),
-        RAG_TOP_K=int(os.getenv('RAG_TOP_K', '4')),
-        RAG_FETCH_K=int(os.getenv('RAG_FETCH_K', '36')),
-        RAG_MAX_CONTEXT_CHARS=int(os.getenv('RAG_MAX_CONTEXT_CHARS', '5200')),
+        XAI_MODEL=os.getenv('XAI_MODEL', 'grok-4-1-fast-reasoning')
     )
-
-    logging.info(
-        "โหลดการตั้งค่าสำเร็จ (สภาพแวดล้อม: %s, โมเดล: %s, multi-ai: %s, rag: %s)",
-        environment,
-        config.XAI_MODEL,
-        config.MULTI_AI_ENABLED,
-        config.RAG_ENABLED,
-    )
+    
     return config
 
 # ระบบข้อความสำหรับโมเดล
@@ -206,7 +128,7 @@ SYSTEM_MESSAGES = {
 ### 1.1 ข้อมูลพื้นฐาน
 - **ชื่อ:** น้องใจดี
 - **บุคลิก:** อบอุ่น ใจเย็น รับฟังโดยไม่ตัดสิน เหมือนพี่ที่ไว้ใจได้
-- **สรรพนาม:** ใช้ "ผม" และลงท้ายด้วย "ครับ" เสมอในทุกข้อความ **ห้ามใช้ "คะ" "ค่ะ" "ดิฉัน" "หนู" โดยเด็ดขาด** — น้องใจดีเป็นผู้ชาย ต้องใช้สรรพนามเพศชายอย่างสม่ำเสมอตลอดทั้งบทสนทนา
+- **สรรพนาม:** ใช้ "ผม" และ "ครับ" ในการสนทนา
 - **ภาษา:** สื่อสารเป็นภาษาไทยเท่านั้น หากผู้ใช้พิมพ์ภาษาอื่น ให้ตอบกลับเป็นภาษาไทย
 
 ### 1.2 ภารกิจหลัก
@@ -245,13 +167,7 @@ SYSTEM_MESSAGES = {
 - **ถามทีละ 1 คำถาม** ไม่ถามหลายคำถามพร้อมกัน
 - หลีกเลี่ยงข้อความยาวที่อาจทำให้ผู้ใช้รู้สึก overwhelmed
 
-### 2.3 กฎสำคัญที่สุด — ห้ามระบุชื่อเทคนิคในข้อความ
-- ห้ามใส่ชื่อเทคนิค หัวข้อขั้นตอน หรือ annotation ใดๆ ลงในข้อความที่ผู้ใช้เห็น ไม่ว่าจะอยู่ในวงเล็บ ในวงเล็บเหลี่ยม หน้าย่อหน้า หรือรูปแบบอื่นใดทั้งสิ้น
-- ตัวอย่างสิ่งที่ **ห้ามทำ**: "(สะท้อนความรู้สึก) ฟังดูเหมือน..." / "(ใช้คำถามปลายเปิด) อะไรที่ทำให้..." / "(สำรวจความขัดแย้ง) คุณพูดถึง..." / "(เน้น Harm Reduction) เราสามารถ..." / "(เน้นการเลือกและควบคุมของผู้ใช้) แม้คุณอาจ..."
-- ตัวอย่างสิ่งที่ **ถูกต้อง**: พูดเนื้อหาตรงๆ เช่น "ฟังดูเหมือนคุณกำลังรู้สึกกังวลกับ..." โดยไม่ต้องบอกว่ากำลังใช้เทคนิคอะไร
-- ให้ใช้เทคนิค MI, OARS, Harm Reduction ฯลฯ อย่างเป็นธรรมชาติ แต่ **ห้ามเปิดเผยชื่อเทคนิคให้ผู้ใช้เห็นโดยเด็ดขาด**
-
-### 2.4 ข้อความเปิดการสนทนา
+### 2.3 ข้อความเปิดการสนทนา
 เมื่อผู้ใช้เริ่มสนทนาครั้งแรก:
 ```
 "สวัสดีครับ ผมชื่อใจดี ยินดีที่ได้รู้จักครับ 🙏 
@@ -686,13 +602,10 @@ SYSTEM_MESSAGES = {
 
 ## 8. แหล่งข้อมูลอ้างอิง
 
-เมื่อต้องให้ข้อมูลเกี่ยวกับสารเสพติด ผลกระทบ และการรักษา ให้ใช้ความรู้ตามลำดับความสำคัญดังนี้:
-1. **บริบทความรู้จากระบบ (RAG Knowledge Base)** — ข้อมูลที่ถูกแนบมาในข้อความ system เป็นแหล่งหลัก ให้ใช้ก่อนเสมอ
-2. **National Institute on Drug Abuse (NIDA):** https://nida.nih.gov/
-3. **กรมสุขภาพจิต กระทรวงสาธารณสุข**
-4. **สำนักงานคณะกรรมการป้องกันและปราบปรามยาเสพติด (ป.ป.ส.)**
-
-**หมายเหตุ:** เมื่อนำความรู้จาก knowledge base มาใช้ ให้สังเคราะห์เป็นภาษาธรรมชาติ ไม่ต้องอ้างชื่อไฟล์หรือแหล่งที่มาให้ผู้ใช้เห็น
+เมื่อต้องให้ข้อมูลเกี่ยวกับสารเสพติด ผลกระทบ และการรักษา ให้อ้างอิงจาก:
+- **National Institute on Drug Abuse (NIDA):** https://nida.nih.gov/
+- **กรมสุขภาพจิต กระทรวงสาธารณสุข**
+- **สำนักงานคณะกรรมการป้องกันและปราบปรามยาเสพติด (ป.ป.ส.)**
 
 ---
 
@@ -709,108 +622,38 @@ SYSTEM_MESSAGES = {
 """
 }
 
-# ===== System Message แบบย่อ สำหรับการสนทนาปกติ =====
-# ลด token overhead ~50% เมื่อเทียบกับ SYSTEM_MESSAGES เต็ม
-# ครอบคลุม: ตัวตน, น้ำเสียง, ขอบเขต, MI หลัก, วิกฤต, หลักการสำคัญ
-SYSTEM_MESSAGE_CORE = {
-    "role": "system",
-    "content": """
-# น้องใจดี — AI ที่ปรึกษาด้านการบำบัดสารเสพติด
-
-## Persona และบทบาท
-- คุณคือ "น้องใจดี" ใช้สรรพนาม "ผม" และลงท้าย "ครับ" เสมอในทุกข้อความ **ห้ามใช้ "คะ" "ค่ะ" "ดิฉัน" "หนู" โดยเด็ดขาด**
-- สื่อสารภาษาไทยเท่านั้น น้ำเสียงอบอุ่น สุภาพ ไม่ตัดสิน
-- บทบาทคือผู้ช่วยสนทนาเชิงสนับสนุนด้านการเลิก/ลดการใช้สารเสพติด
-
-## กฎสำคัญที่สุด — ห้ามระบุชื่อเทคนิคในข้อความ
-- ห้ามใส่ชื่อเทคนิค หัวข้อขั้นตอน หรือ annotation ใดๆ ลงในข้อความที่ผู้ใช้เห็น ไม่ว่าจะอยู่ในวงเล็บ ในวงเล็บเหลี่ยม หน้าย่อหน้า หรือรูปแบบอื่นใดทั้งสิ้น
-- ตัวอย่างสิ่งที่ **ห้ามทำ**: "(สะท้อนความรู้สึก) ฟังดูเหมือน..." / "(ใช้คำถามปลายเปิด) อะไรที่ทำให้..." / "(สำรวจความขัดแย้ง) คุณพูดถึง..." / "(เน้น Harm Reduction) เราสามารถ..."
-- ตัวอย่างสิ่งที่ **ถูกต้อง**: พูดเนื้อหาตรงๆ เช่น "ฟังดูเหมือนคุณกำลังรู้สึกกังวลกับ..." โดยไม่ต้องบอกว่ากำลังใช้เทคนิคอะไร
-- ให้ใช้เทคนิค MI, OARS, Harm Reduction ฯลฯ อย่างเป็นธรรมชาติ แต่ **ห้ามเปิดเผยชื่อเทคนิคให้ผู้ใช้เห็นโดยเด็ดขาด**
-
-## แนวทางการตอบ
-- ตอบกระชับ อ่านง่าย: ปกติ 2-4 ประโยค
-- ถามทีละ 1 คำถาม ไม่ยิงคำถามหลายข้อพร้อมกัน
-- สะท้อนความรู้สึก + ชื่นชมความพยายามของผู้ใช้อย่างจริงใจ
-- หลีกเลี่ยงคำสั่งตรงๆ หรือภาษาตำหนิ
-- ถ้าข้อมูลไม่พอ ให้ถามเพิ่มก่อนสรุปหรือแนะนำ
-- ใช้กรอบ **Motivational Interviewing (MI)** และทักษะ **OARS** ในการสนทนา
-
-## ขอบเขตความปลอดภัย
-- ห้ามวินิจฉัยโรค ห้ามสั่งยา และห้ามให้คำแนะนำที่เสี่ยงอันตราย
-- เมื่อพบสัญญาณอันตรายเร่งด่วน ให้แนะนำติดต่อผู้เชี่ยวชาญทันที
-- หมายเลขฉุกเฉินที่ต้องให้ได้: 1323, 1165, 1669
-
-## การใช้ความรู้จาก Knowledge Base
-- เมื่อมี **บริบทความรู้จากระบบ** แนบมา ให้ใช้ข้อมูลนั้นเป็นแหล่งหลักก่อนเสมอ ให้ความสำคัญสูงกว่าความรู้ทั่วไปจาก training
-- นำความรู้จาก knowledge base มา **สังเคราะห์ผสมผสาน** กับบริบทการสนทนาอย่างเป็นธรรมชาติ ไม่ใช่แค่ copy-paste
-- ห้ามอ้างถึงชื่อไฟล์หรือรหัสเอกสาร (เช่น 01_motivational_interviewing.md) ให้ผู้ใช้ ให้พูดเนื้อหาแทน
-- หากบริบทความรู้ไม่มีข้อมูลเพียงพอหรือไม่เกี่ยวข้อง ให้ตอบด้วยความระมัดระวัง และชวนผู้ใช้เล่าบริบทเพิ่มเติม
-"""
-}
-
-# ===== System Message สำหรับ Summarization =====
-# ใช้กับ summarize_conversation_history, summarize_conversation_chunk, summarize_by_topic
-# ลด token ~80-90% เทียบกับ SYSTEM_MESSAGES เต็ม
-SYSTEM_MESSAGE_SUMMARY = {
-    "role": "system",
-    "content": """
-คุณเป็นผู้ช่วยสรุปประวัติการสนทนาด้านการบำบัดสารเสพติด
-
-หน้าที่: สรุปการสนทนาให้กระชับ ครอบคลุมประเด็นสำคัญ
-
-สรุปโดยเน้น:
-1. สารเสพติดที่ใช้ และปัญหาที่เกี่ยวข้อง
-2. ระยะของการเปลี่ยนแปลง (Precontemplation/Contemplation/Preparation/Action/Maintenance)
-3. Change Talk ที่พบ (DARN-CAT)
-4. อุปสรรคหลัก
-5. ความคืบหน้าหรือการกลับไปใช้ซ้ำ
-
-ใช้ภาษาไทย สรุปเป็นหัวข้อสั้นๆ
-"""
-}
-
 # คอนฟิกการสร้างข้อความ - แยกตามบริบท
 # สำหรับการสนทนาทั่วไป (Motivational Interviewing)
-if "น้องใจดี" not in SYSTEM_MESSAGE_CORE["content"]:
-    SYSTEM_MESSAGE_CORE["content"] = f"น้องใจดี\n{SYSTEM_MESSAGE_CORE['content']}"
-
-if "สรุป" not in SYSTEM_MESSAGE_SUMMARY["content"]:
-    SYSTEM_MESSAGE_SUMMARY["content"] = f"สรุป\n{SYSTEM_MESSAGE_SUMMARY['content']}"
-
 GENERATION_CONFIG = {
-    "temperature": 0.8,
-    "max_tokens": 1500,  # ลดจาก 8000 → ข้อความ 2-4 ประโยค ไม่ต้องการมาก
+    "temperature": 0.8,  # เพิ่มจาก 0.7 → ความหลากหลายและเป็นธรรมชาติมากขึ้น
+    "max_tokens": 8000,  # เพิ่มจาก 4000 → พื้นที่ในการอธิบายมากขึ้น
     "top_p": 0.9,
-    "presence_penalty": 0.6,
-    "frequency_penalty": 0.2,
+    "presence_penalty": 0.4,  # ลดการพูดซ้ำ
+    "frequency_penalty": 0.3,  # หลากหลายในการใช้คำ
 }
 
 # สำหรับสถานการณ์วิกฤต/ฉุกเฉิน
 CRISIS_CONFIG = {
-    "temperature": 0.3,
-    "max_tokens": 2000,  # ลดจาก 6000 → ข้อความวิกฤตต้องกระชับ ชัดเจน
+    "temperature": 0.3,  # ต้องการความแม่นยำและความระมัดระวังสูง
+    "max_tokens": 6000,  # เพิ่มจาก 3000 → ตอบสนองวิกฤตอย่างครบถ้วน
     "top_p": 0.5,
-    "presence_penalty": 0.4,
-    "frequency_penalty": 0.5,
+    "presence_penalty": 0.2,  # ลดการพูดซ้ำเล็กน้อย
 }
 
 # สำหรับการให้ข้อมูลเกี่ยวกับสารเสพติด/การรักษา
 INFO_CONFIG = {
-    "temperature": 0.3,
-    "max_tokens": 3000,  # ลดจาก 6000 → ข้อมูลอาจยาวกว่าปกติ แต่ไม่ต้อง 6000
+    "temperature": 0.3,  # ลดจาก 0.4 → ความถูกต้องสูงสุด
+    "max_tokens": 6000,  # เพิ่มจาก 3500 → ข้อมูลละเอียดมากขึ้น
     "top_p": 0.7,
-    "presence_penalty": 0.3,
-    "frequency_penalty": 0.4,
+    "presence_penalty": 0.2,  # ลดการพูดซ้ำ
 }
 
 # คอนฟิกการสร้างข้อความสรุป
 SUMMARY_GENERATION_CONFIG = {
     "temperature": 0.3,
-    "max_tokens": 4000,  # ลดจาก 16000 → สรุปควรกระชับ
+    "max_tokens": 16000,  # เพิ่มจาก 8000 → สรุปละเอียดและครบถ้วนมากขึ้น
     "top_p": 0.5,
-    "presence_penalty": 0.2,
-    "frequency_penalty": 0.4,
+    "presence_penalty": 0.3,  # ลดการพูดซ้ำ
 }
 
 # ค่า token threshold สำหรับจัดการประวัติการสนทนา
@@ -818,109 +661,8 @@ SUMMARY_GENERATION_CONFIG = {
 # เนื่องจากไม่คำนึงถึง token cost ให้จำประวัติได้มากขึ้นเพื่อคุณภาพการบำบัด
 TOKEN_THRESHOLD = 600000
 
-# เธเธตเธ”เธเธณเธเธฑเธ” context window เธชเธนเธเธชเธธเธ”เธเธญเธ Grok-4 (เนเธเนเนเธ”เน 90% เน€เธเธทเนเธญเธเธงเธฒเธกเธเธฅเธญเธ”เธ เธฑเธข)
+# ขีดจำกัด context window สูงสุดของ Grok-4 (ใช้ได้ 90% เพื่อความปลอดภัย)
 MAX_CONTEXT_WINDOW = int(2000000 * 0.9)  # 1,800,000 tokens
-
-
-_INFO_REQUEST_PATTERNS = (
-    re.compile(r"(?:คืออะไร|หมายถึงอะไร|หมายความว่า|แปลว่า|อธิบาย|ขอข้อมูล|ข้อมูล|รายละเอียด|ผลข้างเคียง|อาการ|วิธี(?:การ)?|ขั้นตอน|สาเหตุ|รักษาอย่างไร|ป้องกันอย่างไร|ต่างกันอย่างไร|ข้อดีข้อเสีย|ข้อควรระวัง)"),
-    re.compile(r"(?:what is|what are|explain|tell me about|side effects?|symptoms?|how to|difference between|treatment|withdrawal)", re.IGNORECASE),
-)
-_INFO_DOMAIN_TERMS = (
-    "ยา",
-    "สาร",
-    "สารเสพติด",
-    "ยาบ้า",
-    "ไอซ์",
-    "กัญชา",
-    "เหล้า",
-    "บุหรี่",
-    "ถอนยา",
-    "บำบัด",
-    "รักษา",
-    "relapse",
-    "overdose",
-    "withdrawal",
-    "craving",
-    "treatment",
-    "symptom",
-    "side effect",
-)
-_INFO_FOLLOW_UP_TERMS = (
-    "แล้ว",
-    "เพิ่มเติม",
-    "อีก",
-    "ต่อ",
-    "อันนี้",
-    "แบบนี้",
-    "กรณีนี้",
-    "นั้น",
-    "พวกนี้",
-    "มีอะไรบ้าง",
-)
-_SUPPORT_DISCLOSURE_TERMS = (
-    "รู้สึก",
-    "เครียด",
-    "กังวล",
-    "ไม่ไหว",
-    "อยากกลับไปใช้",
-    "อยากเสพ",
-    "อยากใช้ยา",
-    "ช่วยหน่อย",
-    "รับมือ",
-)
-
-
-def _normalize_intent_text(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip().lower())
-
-
-def _contains_any_term(text: str, terms) -> bool:
-    return any(term in text for term in terms)
-
-
-def _matches_any_pattern(text: str, patterns) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
-
-
-def _recent_conversation_excerpt(conversation_history: list = None, max_messages: int = 4) -> str:
-    if not conversation_history:
-        return ""
-
-    recent_parts = []
-    for message in reversed(conversation_history[-max_messages:]):
-        if not isinstance(message, dict):
-            continue
-        content = _normalize_intent_text(str(message.get("content", "")))
-        if content:
-            recent_parts.append(content)
-    recent_parts.reverse()
-    return " ".join(recent_parts)
-
-
-def _is_information_request(user_message: str, conversation_history: list = None) -> bool:
-    normalized_message = _normalize_intent_text(user_message)
-    if not normalized_message:
-        return False
-
-    direct_info_request = _matches_any_pattern(normalized_message, _INFO_REQUEST_PATTERNS)
-    has_domain_terms = _contains_any_term(normalized_message, _INFO_DOMAIN_TERMS)
-    has_support_disclosure = _contains_any_term(normalized_message, _SUPPORT_DISCLOSURE_TERMS)
-    has_follow_up_terms = _contains_any_term(normalized_message, _INFO_FOLLOW_UP_TERMS)
-    has_question_signal = any(marker in normalized_message for marker in ("?", "ไหม", "มั้ย", "หรือเปล่า"))
-
-    if direct_info_request and has_domain_terms and not has_support_disclosure:
-        return True
-
-    if any(keyword in normalized_message for keyword in ("คืออะไร", "what is", "อธิบาย", "explain")):
-        return True
-
-    recent_excerpt = _recent_conversation_excerpt(conversation_history)
-    if recent_excerpt and has_follow_up_terms and (direct_info_request or has_domain_terms or has_question_signal):
-        if _contains_any_term(recent_excerpt, _INFO_DOMAIN_TERMS) or _matches_any_pattern(recent_excerpt, _INFO_REQUEST_PATTERNS):
-            return True
-
-    return False
 
 
 def get_dynamic_config(user_message: str, conversation_history: list = None) -> dict:
@@ -934,18 +676,32 @@ def get_dynamic_config(user_message: str, conversation_history: list = None) -> 
     Returns:
         dict: Configuration dictionary ที่เหมาะสม
     """
-    risk_level, _ = assess_risk(user_message)
+    # คำสำคัญสำหรับสถานการณ์วิกฤต
+    crisis_keywords = [
+        'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย', 'ไม่อยากมีชีวิต',
+        'overdose', 'เกินขนาด', 'ก้าวร้าว', 'ทำร้ายคน',
+        'ฆ่า', 'หมดหวัง', 'ไม่มีทางออก', 'จบชีวิต'
+    ]
+
+    # คำสำคัญสำหรับการขอข้อมูล
+    info_keywords = [
+        'คืออะไร', 'อธิบาย', 'ข้อมูล', 'รายละเอียด',
+        'ผลข้างเคียง', 'อาการ', 'วิธีการ', 'ขั้นตอน',
+        'ยาอะไร', 'สารอะไร', 'เสพติดชนิดไหน', 'ความรู้',
+        'บอกหน่อย', 'แนะนำหน่อย', 'ช่วยอธิบาย'
+    ]
+
+    message_lower = user_message.lower()
 
     # ตรวจสอบวิกฤต (ลำดับความสำคัญสูงสุด)
-    if risk_level == 'high':
+    if any(keyword in message_lower for keyword in crisis_keywords):
         logging.info("Detected crisis keywords - using CRISIS_CONFIG")
         return CRISIS_CONFIG
 
     # ตรวจสอบการขอข้อมูล
-    if _is_information_request(user_message, conversation_history):
+    if any(keyword in message_lower for keyword in info_keywords):
         logging.info("Detected information request - using INFO_CONFIG")
         return INFO_CONFIG
 
     # ค่าเริ่มต้น: การสนทนาทั่วไป
     return GENERATION_CONFIG
-

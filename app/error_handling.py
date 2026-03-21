@@ -127,7 +127,6 @@ class CircuitBreaker:
     
     def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute function with circuit breaker protection"""
-        # Acquire lock only for state checks — release before calling func()
         with self.lock:
             self.total_calls += 1
             
@@ -142,26 +141,21 @@ class CircuitBreaker:
                         ErrorSeverity.HIGH,
                         retry_able=False
                     )
-        
-        # Execute outside the lock so concurrent calls are not serialized
-        try:
-            result = func(*args, **kwargs)
-            with self.lock:
-                self._on_success()
-            return result
             
-        except self.expected_exception as e:
-            with self.lock:
+            try:
+                result = func(*args, **kwargs)
+                self._on_success()
+                return result
+                
+            except self.expected_exception as e:
                 self._on_failure()
-                cb_state = self.state.value
-                cb_failures = self.failure_count
-            raise ChatbotError(
-                f"Circuit breaker '{self.name}' caught exception: {str(e)}",
-                ErrorCategory.EXTERNAL_API,
-                ErrorSeverity.MEDIUM,
-                original_error=e,
-                context={'circuit_state': cb_state, 'failure_count': cb_failures}
-            )
+                raise ChatbotError(
+                    f"Circuit breaker '{self.name}' caught exception: {str(e)}",
+                    ErrorCategory.EXTERNAL_API,
+                    ErrorSeverity.MEDIUM,
+                    original_error=e,
+                    context={'circuit_state': self.state.value, 'failure_count': self.failure_count}
+                )
     
     def _should_attempt_reset(self) -> bool:
         """Check if circuit should attempt to reset"""
@@ -218,6 +212,29 @@ class ErrorHandler:
         }
         self.circuit_breakers = {}
         self.lock = threading.Lock()
+        
+        # Initialize circuit breakers for common services
+        self._initialize_circuit_breakers()
+    
+    def _initialize_circuit_breakers(self) -> None:
+        """Initialize circuit breakers for external services"""
+        # xAI Grok API circuit breaker
+        self.circuit_breakers['xai_api'] = CircuitBreaker(
+            name='xai_api',
+            failure_threshold=5,
+            timeout=300,  # 5 minutes
+            expected_exception=(Exception,)
+        )
+        
+        # LINE API circuit breaker
+        self.circuit_breakers['line_api'] = CircuitBreaker(
+            name='line_api',
+            failure_threshold=3,
+            timeout=180,  # 3 minutes
+            expected_exception=(Exception,)
+        )
+        
+        logging.info("Circuit breakers initialized for external services")
     
     def handle_error(
         self,
