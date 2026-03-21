@@ -28,6 +28,10 @@ class TokenUsageTracker:
             "input_per_1k": 0.0005,   # $0.0005 per 1K input tokens (example)
             "output_per_1k": 0.0015,  # $0.0015 per 1K output tokens (example)
         },
+        "grok-4-1-fast-reasoning": {
+            "input_per_1k": 0.0005,
+            "output_per_1k": 0.0015,
+        },
         "grok-2": {
             "input_per_1k": 0.0003,
             "output_per_1k": 0.0010,
@@ -144,6 +148,8 @@ class TokenUsageTracker:
         try:
             # Increment daily totals
             pipe = self.redis.pipeline()
+            if pipe is None:
+                return
 
             pipe.hincrby(f"token_usage:{date}", "total_requests", 1)
             pipe.hincrby(f"token_usage:{date}", "total_input_tokens", metrics['input_tokens'])
@@ -177,20 +183,30 @@ class TokenUsageTracker:
         """Check if any alert thresholds are exceeded"""
         user_stats = stats['by_user'][user_id]
 
-        # Check user daily cost
-        if user_stats['cost'] > self.alerts['user_daily_cost']:
-            if user_stats['cost'] % self.alerts['user_daily_cost'] < 0.01:  # Alert once per threshold
+        # Check user daily cost — alert once per threshold multiple
+        user_threshold = self.alerts['user_daily_cost']
+        if user_threshold > 0 and user_stats['cost'] > user_threshold:
+            alert_level = int(user_stats['cost'] / user_threshold)
+            alert_key = f"_alerted_user_{user_id}_{date}"
+            last_level = getattr(self, alert_key, 0)
+            if alert_level > last_level:
+                setattr(self, alert_key, alert_level)
                 logging.warning(
                     f"ALERT: User {user_id[:8]}... exceeded daily cost threshold: "
-                    f"${user_stats['cost']:.2f} > ${self.alerts['user_daily_cost']:.2f}"
+                    f"${user_stats['cost']:.2f} > ${user_threshold:.2f} (x{alert_level})"
                 )
 
-        # Check global daily cost
-        if stats['total_cost'] > self.alerts['global_daily_cost']:
-            if stats['total_cost'] % self.alerts['global_daily_cost'] < 0.01:
+        # Check global daily cost — alert once per threshold multiple
+        global_threshold = self.alerts['global_daily_cost']
+        if global_threshold > 0 and stats['total_cost'] > global_threshold:
+            alert_level = int(stats['total_cost'] / global_threshold)
+            alert_key = f"_alerted_global_{date}"
+            last_level = getattr(self, alert_key, 0)
+            if alert_level > last_level:
+                setattr(self, alert_key, alert_level)
                 logging.critical(
                     f"ALERT: Global daily cost threshold exceeded: "
-                    f"${stats['total_cost']:.2f} > ${self.alerts['global_daily_cost']:.2f}"
+                    f"${stats['total_cost']:.2f} > ${global_threshold:.2f} (x{alert_level})"
                 )
 
     def get_daily_report(self, date: Optional[str] = None) -> Dict[str, Any]:

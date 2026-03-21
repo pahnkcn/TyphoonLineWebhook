@@ -127,7 +127,7 @@ logs/*.log
 *.swo
 
 # Docker
-.dockerignore
+# (removed .dockerignore from gitignore — needed for CI/CD)
 
 # Config
 config.local.py
