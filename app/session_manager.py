@@ -3,22 +3,19 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Tuple
-from linebot.models import TextSendMessage
 
 redis_client = None
 line_bot_api = None
 token_counter = None
-_config = None
 SESSION_TIMEOUT = 604800
 
-def init_session_manager(redis_instance, line_api, token_counter_instance, session_timeout: int = 604800, config=None):
+def init_session_manager(redis_instance, line_api, token_counter_instance, session_timeout: int = 604800):
     """Initialize session manager dependencies."""
-    global redis_client, line_bot_api, token_counter, SESSION_TIMEOUT, _config
+    global redis_client, line_bot_api, token_counter, SESSION_TIMEOUT
     redis_client = redis_instance
     line_bot_api = line_api
     token_counter = token_counter_instance
     SESSION_TIMEOUT = session_timeout
-    _config = config
 
 
 def get_chat_session(user_id: str) -> List[Dict[str, str]]:
@@ -63,25 +60,20 @@ def save_chat_session(user_id: str, messages: List[Dict[str, str]]) -> None:
         # This ensures token count and session are always in sync
         pipe = redis_client.pipeline()
 
-        if pipe is None:
-            # Redis unavailable — fall back to individual (non-atomic) calls
-            redis_client.setex(f"chat_session:{user_id}", ttl_seconds, json.dumps(serialized_history))
-            redis_client.setex(f"session_tokens:{user_id}", ttl_seconds, str(token_count))
-        else:
-            pipe.setex(
-                f"chat_session:{user_id}",
-                ttl_seconds,
-                json.dumps(serialized_history),
-            )
+        pipe.setex(
+            f"chat_session:{user_id}",
+            ttl_seconds,
+            json.dumps(serialized_history),
+        )
 
-            pipe.setex(
-                f"session_tokens:{user_id}",
-                ttl_seconds,
-                str(token_count),
-            )
+        pipe.setex(
+            f"session_tokens:{user_id}",
+            ttl_seconds,
+            str(token_count),
+        )
 
-            # Execute all commands atomically
-            pipe.execute()
+        # Execute all commands atomically
+        pipe.execute()
 
         logging.debug(
             f"บันทึกเซสชัน: {len(serialized_history)} ข้อความ, {token_count} โทเค็น "
@@ -209,22 +201,20 @@ def get_session_token_count(user_id: str) -> int:
         return 0
 
 
-def is_important_message(user_message: str, bot_response: str, risk_level: str = None) -> bool:
-    """Determine if a message pair is important.
-
-    ใช้ risk_level จาก assess_risk() เป็นตัวตัดสินหลัก:
-    - risk_level == 'high' หรือ 'medium' → สำคัญ (ยกเว้น general)
-    - ข้อความยาวผิดปกติ → สำคัญ (บ่งบอกว่าผู้ใช้เปิดเผยเรื่องสำคัญ)
-
-    เมื่อ risk_level ถูกส่งมา จะไม่ใช้ keyword list แยกอีกต่อไป
-    (keyword list เดิมถูกรวมเข้า RISK_KEYWORDS ใน risk_assessment.py แล้ว)
-    """
-    if risk_level is not None:
-        if risk_level in ('high', 'medium'):
+def is_important_message(user_message: str, bot_response: str) -> bool:
+    """Determine if a message pair is important."""
+    important_keywords = [
+        'ฆ่าตัวตาย', 'ทำร้ายตัวเอง', 'อยากตาย',
+        'overdose', 'เกินขนาด', 'ก้าวร้าว',
+        'ซึมเศร้า', 'วิตกกังวล', 'ความทรงจำ',
+        'ไม่มีความสุข', 'ทรมาน', 'เครียด',
+        'เลิก', 'หยุด', 'อดทน', 'ยา', 'เสพ',
+        'บำบัด', 'กลับไปเสพ', 'อาการ', 'ถอนยา'
+    ]
+    combined_text = (user_message + " " + bot_response).lower()
+    for keyword in important_keywords:
+        if keyword.lower() in combined_text:
             return True
-        if len(user_message) > 300 or len(bot_response) > 500:
-            return True
-        return False
     if len(user_message) > 300 or len(bot_response) > 500:
         return True
     return False
@@ -232,13 +222,52 @@ def is_important_message(user_message: str, bot_response: str, risk_level: str =
 
 def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[str, str]]:
     """Manage conversation history to fit within the context window."""
-    current_history = get_chat_session(user_id)
-    if not current_history:
-        return []
     try:
-        from .services.context_manager import optimize_context
-
-        return optimize_context(user_id, _config, None, max_tokens=token_threshold)
+        current_history = get_chat_session(user_id)
+        if not current_history:
+            return []
+        current_tokens = get_session_token_count(user_id)
+        if current_tokens < token_threshold:
+            return current_history
+        logging.info(
+            f"เซสชันใกล้เต็ม context window ({current_tokens} tokens) สำหรับผู้ใช้ {user_id}, กำลังจัดการประวัติ..."
+        )
+        keep_recent = 30
+        if len(current_history) <= keep_recent * 2:
+            return current_history
+        recent_messages = current_history[-keep_recent*2:]
+        older_messages = current_history[:-keep_recent*2]
+        if older_messages:
+            important_pairs = []
+            normal_pairs = []
+            for i in range(0, len(older_messages), 2):
+                if i+1 < len(older_messages):
+                    user_msg = older_messages[i].get("content", "")
+                    bot_resp = older_messages[i+1].get("content", "")
+                    if is_important_message(user_msg, bot_resp):
+                        important_pairs.append((user_msg, bot_resp))
+                    else:
+                        normal_pairs.append((user_msg, bot_resp))
+            important_messages = []
+            for user_msg, bot_resp in important_pairs:
+                important_messages.append({"role": "user", "content": user_msg})
+                important_messages.append({"role": "assistant", "content": bot_resp})
+            formatted_normal = []
+            for i, (user_msg, bot_resp) in enumerate(normal_pairs):
+                formatted_normal.append((i, user_msg, bot_resp))
+            summary = ""
+            if formatted_normal:
+                from .app_main import summarize_conversation_history
+                summary = summarize_conversation_history(formatted_normal)
+            new_history = []
+            if summary:
+                # ใช้ role พิเศษสำหรับการสรุปที่ไม่แสดงให้ผู้ใช้เห็น
+                new_history.append({"role": "system_summary", "content": f"สรุปการสนทนาก่อนหน้า: {summary}"})
+            new_history.extend(important_messages)
+            new_history.extend(recent_messages)
+            save_chat_session(user_id, new_history)
+            return new_history
+        return current_history
     except Exception as e:
         logging.error(f"เกิดข้อผิดพลาดในการจัดการประวัติ: {str(e)}")
         return current_history
@@ -247,7 +276,7 @@ def hybrid_context_management(user_id: str, token_threshold: int) -> List[Dict[s
 def generate_contextual_followup_message(user_id: str, db, config):
     """สร้างข้อความติดตามที่เป็นไปตามบริบทของการสนทนาล่าสุดโดยใช้ xAI Grok"""
     from .utils import safe_api_call, clean_ai_response
-    from .llm.ai_caller import call_ai
+    from .llm import grok_client
     
     try:
         # ดึงประวัติการสนทนาล่าสุด โดยใช้ max_tokens แทน limit
@@ -293,8 +322,8 @@ def generate_contextual_followup_message(user_id: str, db, config):
 โปรดสร้างข้อความติดตามที่แสดงให้เห็นว่าคุณจำและเข้าใจบริบทของการสนทนาก่อนหน้า:
 """
 
-        # เรียกใช้ AI API (รองรับ multi-AI consensus)
-        text = call_ai(
+        # เรียกใช้ xAI Grok API ด้วยการตั้งค่าที่เหมาะสม
+        text = grok_client.send_chat(
             messages=[
                 {"role": "system", "content": "คุณคือแชทบอท 'ใจดี' ที่ช่วยเหลือคนเลิกสารเสพติดด้วยความเข้าใจและเป็นมิตร คุณสามารถจำและอ้างอิงถึงการสนทนาก่อนหน้าได้"},
                 {"role": "user", "content": followup_prompt}

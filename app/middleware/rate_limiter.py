@@ -3,49 +3,9 @@
 ช่วยป้องกันการใช้งานบริการมากเกินไปและป้องกันการโจมตี DDoS
 """
 import logging
-import os
-import ipaddress
 from flask import request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-
-def _should_trust_proxy_headers() -> bool:
-    trust_proxy_env = os.getenv('TRUST_PROXY_HEADERS', '').strip().lower()
-    if trust_proxy_env in {'1', 'true', 'yes'}:
-        return True
-
-    remote_addr = (get_remote_address() or '').strip()
-    if not remote_addr:
-        return False
-
-    try:
-        remote_ip = ipaddress.ip_address(remote_addr)
-    except ValueError:
-        return False
-
-    return remote_ip.is_loopback or remote_ip.is_private
-
-def _get_client_identifier():
-    if _should_trust_proxy_headers():
-        forwarded_for = request.headers.get('X-Forwarded-For', '')
-        if forwarded_for:
-            forwarded_ip = forwarded_for.split(',', 1)[0].strip()
-            if forwarded_ip:
-                try:
-                    ipaddress.ip_address(forwarded_ip)
-                    return forwarded_ip
-                except ValueError:
-                    pass
-
-        real_ip = request.headers.get('X-Real-IP', '').strip()
-        if real_ip:
-            try:
-                ipaddress.ip_address(real_ip)
-                return real_ip
-            except ValueError:
-                pass
-
-    return get_remote_address()
 
 def init_limiter(app):
     """
@@ -61,7 +21,7 @@ def init_limiter(app):
     # เริ่มต้น Limiter
     limiter = Limiter(
         app=app,
-        key_func=_get_client_identifier,
+        key_func=lambda: request.headers.get('X-Line-Signature', get_remote_address()),
         default_limits=["200 per day", "50 per hour"],
         strategy="fixed-window"  # ใช้อัลกอริทึมหน้าต่างคงที่
     )
@@ -70,12 +30,19 @@ def init_limiter(app):
     @app.errorhandler(429)
     def ratelimit_handler(e):
         """จัดการกรณีที่เกินขีดจำกัดการใช้งาน"""
-        logging.warning(f"Rate limit exceeded: {_get_client_identifier()}")
+        logging.warning(f"Rate limit exceeded: {get_remote_address()}")
         return jsonify({
             "error": "rate_limit_exceeded",
             "message": "ขออภัย คุณส่งคำขอมากเกินไป กรุณาลองใหม่ในภายหลัง",
             "retry_after": getattr(e, "retry_after", 60)
         }), 429
+    
+    # ตั้งค่าขีดจำกัดเฉพาะสำหรับเส้นทางต่างๆ
+    limiter.limit("10/minute")(app.route("/callback", methods=["POST"]))
+    limiter.limit("60/hour")(app.route("/health", methods=["GET"]))
+    
+    # ยกเว้นเส้นทางบางอย่างจากการจำกัดอัตรา
+    limiter.exempt(app.route("/favicon.ico"))
     
     return limiter
 
@@ -91,16 +58,23 @@ def get_custom_limiter(redis_client, app=None):
         Limiter: อินสแตนซ์ของตัวจำกัดอัตราที่ใช้ Redis
     """
     try:
+        from flask_limiter.util import get_ipaddr
         from flask_limiter.extension import Limiter
         
         def get_identifier():
             """กำหนดตัวระบุสำหรับ rate limiting"""
             # เลือกใช้ Line User ID ถ้ามี, มิฉะนั้นใช้ IP address
-            line_user_id = request.headers.get('X-Line-User-ID', '').strip()
+            line_user_id = request.headers.get('X-Line-User-ID')
             if line_user_id:
                 return f"line:{line_user_id}"
             
-            return _get_client_identifier()
+            # หรือลายเซ็น LINE ถ้ามี
+            line_signature = request.headers.get('X-Line-Signature')
+            if line_signature:
+                return f"linesig:{line_signature}"
+                
+            # กลับไปใช้ตัวระบุ IP เป็นตัวเลือกสุดท้าย
+            return get_ipaddr()
         
         # สร้าง Limiter ด้วย Redis
         limiter = Limiter(
