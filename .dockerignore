@@ -1,0 +1,51 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Tests & Docs
+tests/
+docs/
+examples/
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & Config
+.env
+.env.local
+.env.example
+config.local.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+ngrok.exe
+logs/*.log
+*.db
+*.sqlite
+scripts/install.*
+docker-compose.override.yml
+docker-compose.prod.yml
+.github/
+.windsurf/

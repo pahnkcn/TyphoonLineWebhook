@@ -11,6 +11,13 @@ gunicorn>=21.2.0
 APScheduler>=3.10.1
 requests>=2.31.0
 tiktoken>=0.5.1
+python-json-logger>=2.0.7
+alembic>=1.13.0
+flask-cors>=4.0.0
+pypdf>=3.0.0
+python-docx>=0.8.11
+numpy>=1.24.0
 
 # Testing Dependencies
 pytest>=8.4.1
+pytest-asyncio>=0.23.0

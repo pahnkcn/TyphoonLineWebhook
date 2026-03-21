@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo ใจดี Chatbot - Installation Script
+echo ใจดี Chatbot - Local Development Setup
 echo ========================================
 echo.
 
@@ -10,7 +10,7 @@ echo.
 where python >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo Python is not installed or not in PATH.
-    echo Please install Python 3.9 or higher from https://www.python.org/downloads/
+    echo Please install Python 3.11 or higher from https://www.python.org/downloads/
     exit /b 1
 )
 
@@ -57,62 +57,47 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Check for .env file and create it if it doesn't exist
+:: Check for .env file and create from .env.example
 if not exist .env (
-    echo Creating .env file with default settings...
-    (
-        echo # LINE API Credentials
-        echo LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token
-        echo LINE_CHANNEL_SECRET=your_line_channel_secret
-        echo.
-        echo # xAI Grok API Configuration
-        echo XAI_API_KEY=your_xai_api_key
-        echo.
-        echo # Redis Configuration
-        echo REDIS_HOST=localhost
-        echo REDIS_PORT=6379
-        echo REDIS_DB=0
-        echo.
-        echo # MySQL Configuration
-        echo MYSQL_HOST=localhost
-        echo MYSQL_PORT=3306
-        echo MYSQL_USER=root
-        echo MYSQL_PASSWORD=password
-        echo MYSQL_DB=chatbot
-        echo.
-        echo # For Docker Compose
-        echo MYSQL_ROOT_PASSWORD=password
-    ) > .env
-    echo Please edit the .env file with your actual credentials.
+    if exist .env.example (
+        echo Creating .env file from .env.example...
+        copy .env.example .env
+        echo Please edit the .env file with your actual credentials.
+    ) else (
+        echo WARNING: .env.example not found. Please create .env manually.
+    )
 )
 
 echo.
 echo Installation completed successfully!
 echo.
 echo Available options:
-echo 1. Run locally with Python
+echo 1. Run locally with Python (Waitress)
 echo 2. Run with Docker Compose (requires Docker)
-echo 3. Exit
+echo 3. Run tests
+echo 4. Exit
 
-choice /c 123 /n /m "Choose an option [1-3]: "
+choice /c 1234 /n /m "Choose an option [1-4]: "
 
 if %ERRORLEVEL% equ 1 (
     echo Starting the chatbot locally...
-    python app_main.py
+    python wsgi.py
 ) else if %ERRORLEVEL% equ 2 (
     if %DOCKER_AVAILABLE% equ 1 (
         echo Starting with Docker Compose...
-        docker-compose up -d
+        docker compose up -d
     ) else (
         echo Docker is not available. Cannot start with Docker Compose.
     )
+) else if %ERRORLEVEL% equ 3 (
+    echo Running tests...
+    pytest tests/ -v --tb=short
 ) else (
     echo Exiting installation.
 )
 
 echo.
 echo Thank you for installing ใจดี Chatbot!
-echo For more information, visit https://github.com/yourusername/chatbot
 echo.
 
 :: Deactivate the virtual environment
