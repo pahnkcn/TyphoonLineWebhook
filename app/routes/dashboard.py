@@ -1,4 +1,4 @@
-﻿"""Dashboard routes â€” extracted from app_main.py as a Flask Blueprint."""
+"""Dashboard routes -- extracted from app_main.py as a Flask Blueprint."""
 import csv
 import hashlib
 import io
@@ -19,14 +19,15 @@ from ..risk_assessment import normalize_risk_level, RISK_KEYWORDS
 dashboard_bp = Blueprint('dashboard', __name__)
 
 # CORS for dashboard API endpoints only (not the whole app)
-_dashboard_cors_origins = os.getenv('DASHBOARD_CORS_ORIGINS', '').split(',') if os.getenv('DASHBOARD_CORS_ORIGINS') else []
-CORS(
-    dashboard_bp,
-    resources={
-        r"/api/dashboard/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "OPTIONS"]},
-        r"/api/knowledge/*": {"origins": _dashboard_cors_origins or "*", "methods": ["GET", "POST", "OPTIONS"]},
-    },
-)
+_dashboard_cors_origins = [o.strip() for o in os.getenv('DASHBOARD_CORS_ORIGINS', '').split(',') if o.strip()]
+if _dashboard_cors_origins:
+    CORS(
+        dashboard_bp,
+        resources={
+            r"/api/dashboard/*": {"origins": _dashboard_cors_origins, "methods": ["GET", "OPTIONS"]},
+            r"/api/knowledge/*": {"origins": _dashboard_cors_origins, "methods": ["GET", "POST", "OPTIONS"]},
+        },
+    )
 
 
 @dashboard_bp.after_request
@@ -84,10 +85,6 @@ def _require_dashboard_auth():
         token = auth_header[7:]
         if hmac.compare_digest(token, _DASHBOARD_API_KEY):
             return True, None
-    token = request.args.get('api_key', '')
-    if token and hmac.compare_digest(token, _DASHBOARD_API_KEY):
-        logging.warning("Dashboard API key passed via query parameter â€” use Authorization header instead")
-        return True, None
     return False, (jsonify({"error": "Unauthorized"}), 401)
 
 
@@ -512,7 +509,7 @@ def get_dashboard_user_history(user_id: str):
         logging.error('Error retrieving dashboard user history for %s: %s', user_id, exc, exc_info=True)
         return jsonify({
             'error': 'user_history_unavailable',
-            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸”à¸¶à¸‡à¸›à¸£à¸°à¸§à¸±à¸•à¸´à¸à¸²à¸£à¸ªà¸™à¸—à¸™à¸²à¹„à¸”à¹‰à¹ƒà¸™à¸‚à¸“à¸°à¸™à¸µà¹‰',
+            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸"à¸¶à¸‡à¸›à¸£à¸°à¸§à¸±à¸•à¸´à¸à¸²à¸£à¸ªà¸™à¸—à¸™à¸²à¹„à¸"à¹‰à¹ƒà¸™à¸‚à¸"à¸°à¸™à¸µà¹‰',
         }), 500
 
 @dashboard_bp.route('/api/dashboard/multi-ai-stats', methods=['GET'])
@@ -931,6 +928,6 @@ def export_conversations():
         logging.error('Error exporting conversations: %s', exc, exc_info=True)
         return jsonify({
             'error': 'export_failed',
-            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸ªà¹ˆà¸‡à¸­à¸­à¸à¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¹„à¸”à¹‰à¹ƒà¸™à¸‚à¸“à¸°à¸™à¸µà¹‰',
+            'message': 'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸ªà¹ˆà¸‡à¸­à¸­à¸à¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¹„à¸"à¹‰à¹ƒà¸™à¸‚à¸"à¸°à¸™à¸µà¹‰',
         }), 500
 

@@ -202,20 +202,24 @@ class ProviderRegistry:
             logger.info("Cleared multi-AI client cache")
 
 
+_registry: Optional[ProviderRegistry] = None
+_registry_lock = threading.Lock()
+
+
 def get_registry() -> ProviderRegistry:
     """Get or create the global provider registry singleton."""
     global _registry
     if _registry is None:
-        _registry = ProviderRegistry()
+        with _registry_lock:
+            if _registry is None:
+                _registry = ProviderRegistry()
     return _registry
 
 
 def reset_registry():
     """Reset the global registry (for testing)."""
     global _registry
-    _registry = None
+    with _registry_lock:
+        _registry = None
     with _cache_lock:
         _client_cache.clear()
-
-
-_registry: Optional[ProviderRegistry] = None
